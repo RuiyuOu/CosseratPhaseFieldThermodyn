@@ -1,0 +1,16 @@
+{
+ "units": {"length": "um", "time": "ns", "stress": "GPa", "temperature": "K", "density": "1e3 kg/m3", "energy_per_thickness": "GPa um^2 = 1e-3 J/m"},
+ "variant": "F", "mesh": "mesh_F.msh", "j_um2": 0.01, "amp_GPa": 0.06, "load_dir": "shear",
+ "tend_ns": 15, "dt_ns": 0.01, "nrelax": 0, "pulse_ns": [2, 3, 2],
+ "mu_c": 75.4, "rho": 8.96, "C_lattice": {"xxxx": 220.3, "yyyy": 168.4, "xxyy": 121.4, "xyxy": 75.4, "xxzz": 69.5, "yyzz": 121.4},
+ "lattice_frame": "x=[110], y=[001], z=[-110]",
+ "slip_systems_lattice": [{"s": [1, 0], "n": [-0, 1], "f": 1.732050808}, {"s": [0.5773502692, 0.8164965809], "n": [-0.8164965809, 0.5773502692], "f": 1.154700538}, {"s": [0.5773502692, -0.8164965809], "n": [0.8164965809, 0.5773502692], "f": 1.154700538}],
+ "grain_theta0_rad": [-1.081090087, -1.611359543, -1.453867884, -0.4656052007, -2.809241184, -0.5349888836, -1.754067952, -2.293332656],
+ "hardening": {"tau0": 0.001, "lambda_T": 0.3, "mu": 48, "b_um": 0.0002556, "rho0_um2": 10, "K": 0.05, "d_um": 0.0005, "chi": 1, "alpha_mu": 0.00038},
+ "rate": {"gdot0_per_ns": 1e-06, "m": 50, "B0_GPa_ns": 2e-05},
+ "thermal": {"T0": 300, "rhoC": 0.00345, "k": 0.0004},
+ "curvature_F": {"A": 0.12, "l_mode": 0.05},
+ "kwc_A": {"f0": 0.005944, "a": 0.1, "s": 1.05, "eps": 0.004, "delta": 0.005, "eta_phi0": 0.1, "Q_phi": 100000, "eta_star0": 0.001, "C_D": 10, "g": "-2[phi + ln(1-phi)]", "h": 1, "f": "(1-phi)^2/2", "spin_friction": "eta_s = 2 eta_star0/(1-phi)^2", "phi_max": 0.9999999},
+ "kinematics": "finite deformation: F = I + grad u = R(theta) Ubar Fp, Fp(0) = I in the grain-rotated reference lattice; SVK on Ebar = (Ubar^T Ubar - I)/2 + 2 mu_c a^2, a = (Ubar_21 - Ubar_12)/2; element-mean finite-strain correction on a pointwise quadratic P2 operator",
+ "fields_note": "Point data (P1, nodal): u, v, dtheta_deg, theta_lattice_deg, theta_dot, T, phi -- the fields differentiated in post-processing. Cell data (P0, one value per triangle, exact solver values at the element-mean deformation): p1-p3 (accumulated slip), slip paths, rhoS, rhoG, kp, wstar, tau_c, tau_1-3 (Mandel resolved shear stress M:s(x)n), Cauchy stress sig_ij = (P F^T/J)_ij with i the force direction, sig_33, referential couple stress m, D_rate, Fp_ij (plastic distortion, reference frame), w_cosserat = (Ubar_21-Ubar_12)/2, J = det F, psi_elastic (SVK + Cosserat energy density per reference area). Cells include the boundary edges (line cells); use triangle cells only. Grain id = cell Label of triangles. Derived in paraview_derived.py: theta0, slip_net, drag_eta, strain measures. For F, theta_lattice_deg uses the grain angle averaged to the nodes. Coordinates and u are referential (Lagrangian); use u to warp. theta_dot in rad/ns, D_rate in GPa/ns, rho in um^-2."
+}
