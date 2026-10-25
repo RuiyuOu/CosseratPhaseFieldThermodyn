@@ -1,0 +1,34 @@
+variant A  j=0.01 um^2  muc=75.4  amp=0.06 GPa  dir=shear  dt=0.01  steps=1600  nt=58391  ndof=263775
+relaxation done: E0=0.0373521 min phi=0.0199618
+step 100 t=0 it=12 KE=0 Wext=0 res=0 maxslip=0.00958069 dTmax=0  wall=5134.92 s
+step 150 t=0.5 it=12 KE=1.53411e-05 Wext=1.34546e-06 res=2.52126e-05 maxslip=0.00874285 dTmax=0.00616713  wall=6852.59 s
+step 200 t=1 it=14 KE=5.43855e-05 Wext=8.24013e-05 res=1.92512e-05 maxslip=0.00767416 dTmax=0.00683696  wall=8433.52 s
+step 250 t=1.5 it=12 KE=0.000343411 Wext=0.000681149 res=1.63209e-05 maxslip=0.00733998 dTmax=0.0184305  wall=9980.46 s
+step 300 t=2 it=9 KE=0.0010108 Wext=0.00210519 res=1.30922e-05 maxslip=0.00820142 dTmax=0.04326  wall=11524 s
+step 350 t=2.5 it=9 KE=0.00191063 Wext=0.00406456 res=1.04958e-05 maxslip=0.0121004 dTmax=0.0710643  wall=13025.9 s
+step 400 t=3 it=12 KE=0.00302224 Wext=0.00646361 res=8.77909e-06 maxslip=0.0164376 dTmax=0.102285  wall=14526.1 s
+step 450 t=3.5 it=9 KE=0.0043215 Wext=0.00929178 res=7.33125e-06 maxslip=0.0213951 dTmax=0.136425  wall=15960.7 s
+step 500 t=4 it=9 KE=0.00578226 Wext=0.0125308 res=6.33633e-06 maxslip=0.0269863 dTmax=0.17344  wall=17440.2 s
+step 550 t=4.5 it=8 KE=0.00740644 Wext=0.0161756 res=5.54646e-06 maxslip=0.0331319 dTmax=0.214081  wall=18783.6 s
+step 600 t=5 it=7 KE=0.0092066 Wext=0.0202228 res=4.98325e-06 maxslip=0.0396228 dTmax=0.257256  wall=20101.8 s
+step 650 t=5.5 it=6 KE=0.011049 Wext=0.0245177 res=4.60948e-06 maxslip=0.0456665 dTmax=0.298756  wall=21392.1 s
+step 700 t=6 it=6 KE=0.0119575 Wext=0.0276301 res=4.34627e-06 maxslip=0.0474677 dTmax=0.311718  wall=22638.1 s
+step 750 t=6.5 it=5 KE=0.0114058 Wext=0.0286839 res=4.18953e-06 maxslip=0.0474945 dTmax=0.300651  wall=23844.3 s
+step 800 t=7 it=5 KE=0.0103301 Wext=0.0287723 res=4.07523e-06 maxslip=0.0474975 dTmax=0.288939  wall=25050.8 s
+step 850 t=7.5 it=5 KE=0.0094329 Wext=0.0287723 res=3.97384e-06 maxslip=0.0476086 dTmax=0.28077  wall=26196.5 s
+step 900 t=8 it=4 KE=0.00869101 Wext=0.0287723 res=3.90425e-06 maxslip=0.0476175 dTmax=0.269434  wall=27287.7 s
+step 950 t=8.5 it=4 KE=0.00804106 Wext=0.0287723 res=3.84115e-06 maxslip=0.0476188 dTmax=0.260162  wall=28365.1 s
+step 1000 t=9 it=4 KE=0.00743939 Wext=0.0287723 res=3.79753e-06 maxslip=0.047619 dTmax=0.252067  wall=29416.7 s
+step 1050 t=9.5 it=4 KE=0.00687118 Wext=0.0287723 res=3.76263e-06 maxslip=0.047619 dTmax=0.245086  wall=30448.4 s
+step 1100 t=10 it=3 KE=0.00633606 Wext=0.0287723 res=3.74038e-06 maxslip=0.047619 dTmax=0.238901  wall=31400.3 s
+step 1150 t=10.5 it=3 KE=0.00583409 Wext=0.0287723 res=3.723e-06 maxslip=0.047619 dTmax=0.233415  wall=32339.3 s
+step 1200 t=11 it=3 KE=0.00536055 Wext=0.0287723 res=3.7087e-06 maxslip=0.047619 dTmax=0.22851  wall=33262.1 s
+step 1250 t=11.5 it=3 KE=0.00490961 Wext=0.0287723 res=3.69783e-06 maxslip=0.047619 dTmax=0.224108  wall=34159.2 s
+step 1300 t=12 it=2 KE=0.00448065 Wext=0.0287723 res=3.68892e-06 maxslip=0.047619 dTmax=0.22012  wall=35044.9 s
+step 1350 t=12.5 it=2 KE=0.00407296 Wext=0.0287723 res=3.68236e-06 maxslip=0.0476452 dTmax=0.216463  wall=35904.7 s
+step 1400 t=13 it=2 KE=0.0036851 Wext=0.0287723 res=3.67527e-06 maxslip=0.0513709 dTmax=0.213098  wall=36747.2 s
+step 1450 t=13.5 it=2 KE=0.00331568 Wext=0.0287723 res=3.66859e-06 maxslip=0.0552191 dTmax=0.20997  wall=37572.2 s
+step 1500 t=14 it=2 KE=0.00296456 Wext=0.0287723 res=3.6635e-06 maxslip=0.0589406 dTmax=0.207031  wall=38383.7 s
+step 1550 t=14.5 it=2 KE=0.00263368 Wext=0.0287723 res=3.65906e-06 maxslip=0.0621524 dTmax=0.204244  wall=39207.4 s
+step 1600 t=15 it=2 KE=0.00232316 Wext=0.0287723 res=3.65621e-06 maxslip=0.0648745 dTmax=0.201581  wall=40025.5 s
+done. wall time 40027.9 s
