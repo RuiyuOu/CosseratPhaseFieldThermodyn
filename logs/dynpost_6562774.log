@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/work/users/r/y/ryo7/KWCDyn/post/animate.py", line 1, in <module>
+    import sys, os, numpy as np, matplotlib; matplotlib.use('Agg')
+ModuleNotFoundError: No module named 'matplotlib'

@@ -1,0 +1,2 @@
+task 4: compression 2 GPa, shear 0.2 GPa, tag lad_P2000MPa_S200MPa
+[2026-10-25T17:20:57.469] error: *** JOB 6609801 ON c151406 CANCELLED AT 2026-10-25T17:20:57 DUE to SIGNAL Terminated ***

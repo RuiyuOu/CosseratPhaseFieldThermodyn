@@ -1,0 +1,1018 @@
+// =====================================================================
+// cosserat2d.edp  --  dynamic, finite-deformation, plane-strain Cosserat crystal
+// plasticity on a [1-10] Rice planar-triple-slip polycrystal.
+// Kinematics: F = I + grad u, F = R(theta) Ubar Fp, Fp(0) = I (reference lattice = grain angle),
+//   St Venant-Kirchhoff on Ebar = (Ubar^T Ubar - I)/2 with the grain-rotated cubic C, plus 2 mu_c a^2,
+//   a = (Ubar_21 - Ubar_12)/2.  Fp_{n+1} = exp(dLp) Fp_n with dLp = sum dgamma s(x)n + dw* What.
+// Discretization of the elastic energy: exact pointwise quadratic part (P2/P1) + element-mean
+//   finite-strain correction  A_e [psi(Fbar_e, thbar_e, Fp_e) - psi_lin(Fbar_e, thbar_e, Fp_e)]
+//   (a stabilized one-point evaluation of the geometric nonlinearity; exact for element-constant F).
+// Variants:  F = Forest-type plastic curvature (edge law) + GND hardening
+//            A = Ask-type KWC phase field + grain-boundary plastic spin
+// Units: um, ns, GPa, K  (density 1e3 kg/m3; 1 Pa s = 1 GPa ns)
+// Integrator: Newmark average acceleration (generalized-alpha rho_inf = 1),
+//   modified Newton with a constant elastic tangent ("initial stress"),
+//   implicit (backward-Euler) local update of slip / plastic curvature / GB spin,
+//   staggered implicit heat equation and phase-field equation.
+// No thermal expansion; energetic coefficients frozen at T0.
+// =====================================================================
+load "iovtk"
+
+// ---------------- command-line arguments -----------------------------
+func string arg(string key, string def) {
+  string r = def;
+  for (int i = 0; i < ARGV.n - 1; i++) if (ARGV[i] == key) r = ARGV[i+1];
+  return r;
+}
+string variant = arg("-variant", "F");
+real jz      = atof(arg("-j", "1e-2"));      // um^2   (1e-14 m^2 = 1e-2 um^2)
+real amp     = atof(arg("-amp", "0.06"));    // GPa nominal traction
+string ldir  = arg("-dir", "shear");         // shear | comp | combo
+real ampS    = atof(arg("-shear", "0"));    // combo: additional shear traction (GPa, +y) on the loaded edge, with compression -amp in x
+real tend    = atof(arg("-tend", "15"));     // ns
+real dt      = atof(arg("-dt", "0.01"));     // ns
+real muc     = atof(arg("-muc", "75.4"));    // GPa
+string out   = arg("-out", "run_" + variant);
+int nrelax   = atoi(arg("-nrelax", "100"));  // A: zero-load interface relaxation steps
+int vtkon    = atoi(arg("-vtk", "1"));
+int vtkevery = atoi(arg("-vtkevery", "0"));     // extra snapshots every N loaded steps (0 = only at 2/5/7/10 ns and the end)
+int maxit    = atoi(arg("-maxit", "40"));
+int verbose  = atoi(arg("-verbose", "0"));
+real tolU    = atof(arg("-tol", "1e-7"));
+int stepsmax = atoi(arg("-stepsmax", "100000000"));
+real tscale  = atof(arg("-tscale", "1"));
+string restart = arg("-restart", "");       // checkpoint file to resume from
+real walllimit = atof(arg("-walllimit", "1e30"));   // s: checkpoint and stop after this wall time
+int ckevery  = atoi(arg("-ckevery", "100"));     // debug: compress the load envelope in time
+bool isA = (variant == "A");
+
+// ---------------- material parameters --------------------------------
+real rho = 8.96;                  // GPa ns^2 / um^2
+real Clxx = 220.3, Clyy = 168.4, Clxy = 121.4, Clss = 75.4;   // lattice frame x=[110], y=[001]
+real Clxz = 69.5, Clyz = 121.4;                                 // for sigma33 output
+real mu = 48., b = 2.556e-4;      // GPa, um
+real tau0 = 0.001, lamT = 0.3;    // GPa
+real rho0 = 10.;                  // um^-2  (1e13 m^-2)
+real g0 = 1e-6, mexp = 50.;       // 1/ns, rate exponent
+real B0 = 2e-5;                   // GPa ns (2e-5 Pa s) at T0
+real Kkmt = 0.05, dkmt = 5e-4;    // KMT storage, d in um
+real chi = 1.0;
+real T0 = 300., alphaMu = 3.8e-4;
+real rhoC = 3.45e-3, kth = 4e-4;  // GPa/K, GPa um^2/(ns K)
+real lc = 0.05, Acurv = mu*lc*lc, lmode = 0.05;   // F: curvature modulus (GPa um^2), mode length
+// A: KWC, Lobkovsky-Warren logarithmic coupling (Read-Shockley):
+//   psi_K = f0 [ (1-phi)^2/2 + a^2 |grad phi|^2/2 + s g(phi) N(grad theta_t) + eps^2 |grad theta_t|^2/2 ]
+//   g = -2[phi + ln(1-phi)],  h = 1,  N = sqrt(|grad theta_t|^2 + delta^2) - delta
+real f0 = atof(arg("-f0", "0.0115")), aK = atof(arg("-kwca", "0.062")), sK = atof(arg("-kwcs", "0.150")),
+     eK = atof(arg("-kwce", "0.200")), dlt = atof(arg("-kwcd", "0.005"));   // [defaults set by calib/fit2.py]
+real phimax = 1. - 1e-7;     // cap: g diverges at phi = 1
+real etaPhi0 = 0.1, Qphi = 100e3, Rgas = 8.314;   // GPa ns, J/mol
+real etaStar0 = atof(arg("-etastar", "1e-3")), CD = 10.;
+real etaPhiRelax = 1e-3;
+real fs1 = sqrt(3.), fs2 = 2./sqrt(3.), fs3 = 2./sqrt(3.);
+real aR = atan(sqrt(2.));
+real[int] slx = [1., cos(aR), cos(aR)], sly = [0., sin(aR), -sin(aR)];   // lattice slip directions
+real[int] fsa = [fs1, fs2, fs3];
+
+// ---------------- mesh and grain data --------------------------------
+string mfile = "mesh_F.msh"; if (isA) mfile = "mesh_A.msh";
+mesh Th = readmesh(mfile);
+int nt = Th.nt;
+real[int] thg(8);
+{ ifstream f("theta_rice_rad.txt"); for (int i = 0; i < 8; i++) f >> thg(i); }
+
+fespace Wh(Th, [P2, P2, P1]);
+fespace Vh1(Th, P1);
+fespace Ph(Th, P0);
+Wh [u1, u2, th], [v1, v2, ze];
+Vh1 T = T0, Tn = T0, phi = 1., phin = 1., th0s = 0., xi, thR = 0.;
+if (isA) { phi = 0.999; phin = phi; }   // log coupling: start just below phi = 1 (g diverges there)   // thR: GND reference rotation (relaxed state)
+Ph thg0;
+for (int k = 0; k < nt; k++) thg0[][k] = thg(Th[k].label - 1);
+
+// rotated stiffness and Schmid data per element (arrays)
+real[int] C11(nt), C22(nt), C12(nt), C16(nt), C26(nt), C66(nt);
+real[int] P11a(nt), P22a(nt), P12a(nt), P11b(nt), P22b(nt), P12b(nt), P11c(nt), P22c(nt), P12c(nt);
+real[int] s1x(nt), s1y(nt), s2x(nt), s2y(nt), s3x(nt), s3y(nt);
+real[int] G11(nt), G22(nt), G33(nt), G12(nt), G13(nt), G23(nt);
+real[int] K11(nt), K22(nt), K33(nt), K12(nt), K13(nt), K23(nt);   // curvature-mode coupling (F)
+{
+  real[int] Cl(16); Cl = 0;
+  // index i*8+j*4+k*2+l, 0=x,1=y
+  Cl[0] = Clxx; Cl[15] = Clyy; Cl[3] = Clxy; Cl[12] = Clxy;
+  Cl[5] = Clss; Cl[6] = Clss; Cl[9] = Clss; Cl[10] = Clss;
+  real[int,int] Cg(8, 6), Sg(8, 6), Pg(8, 9), Gg(8, 6), Kg(8, 6);
+  for (int g = 0; g < 8; g++) {
+    real c = cos(thg(g)), s = sin(thg(g));
+    real[int] R = [c, -s, s, c];   // R[i*2+p]
+    real[int] Cr(16); Cr = 0;
+    for (int i=0;i<2;i++) for (int j=0;j<2;j++) for (int k=0;k<2;k++) for (int l=0;l<2;l++) {
+      real sum = 0;
+      for (int p=0;p<2;p++) for (int q=0;q<2;q++) for (int r=0;r<2;r++) for (int t=0;t<2;t++)
+        sum += R[i*2+p]*R[j*2+q]*R[k*2+r]*R[l*2+t]*Cl[p*8+q*4+r*2+t];
+      Cr[i*8+j*4+k*2+l] = sum;
+    }
+    Cg(g,0)=Cr[0]; Cg(g,1)=Cr[15]; Cg(g,2)=Cr[3]; Cg(g,3)=Cr[1]; Cg(g,4)=Cr[13]; Cg(g,5)=Cr[5];
+    real[int] PP(9);
+    for (int a = 0; a < 3; a++) {
+      real sx = c*slx[a] - s*sly[a], sy = s*slx[a] + c*sly[a];
+      real nx = -sy, ny = sx;
+      Sg(g, 2*a) = sx; Sg(g, 2*a+1) = sy;
+      PP[3*a] = sx*nx; PP[3*a+1] = sy*ny; PP[3*a+2] = 0.5*(sx*ny + sy*nx);
+    }
+    for (int a = 0; a < 9; a++) Pg(g, a) = PP[a];
+    // G_ab = P_a : C : P_b + muc
+    real[int] GG(9), KK(9);
+    for (int a = 0; a < 3; a++) for (int bb = 0; bb < 3; bb++) {
+      real e11 = PP[3*bb], e22 = PP[3*bb+1], e12 = PP[3*bb+2];
+      real s11 = Cg(g,0)*e11 + Cg(g,2)*e22 + 2*Cg(g,3)*e12;
+      real s22 = Cg(g,2)*e11 + Cg(g,1)*e22 + 2*Cg(g,4)*e12;
+      real s12 = Cg(g,3)*e11 + Cg(g,4)*e22 + 2*Cg(g,5)*e12;
+      GG[3*a+bb] = s11*PP[3*a] + s22*PP[3*a+1] + 2*s12*PP[3*a+2] + muc;
+      KK[3*a+bb] = Acurv/(lmode*lmode) * (Sg(g,2*a)*Sg(g,2*bb) + Sg(g,2*a+1)*Sg(g,2*bb+1));
+    }
+    Gg(g,0)=GG[0]; Gg(g,1)=GG[4]; Gg(g,2)=GG[8]; Gg(g,3)=GG[1]; Gg(g,4)=GG[2]; Gg(g,5)=GG[5];
+    Kg(g,0)=KK[0]; Kg(g,1)=KK[4]; Kg(g,2)=KK[8]; Kg(g,3)=KK[1]; Kg(g,4)=KK[2]; Kg(g,5)=KK[5];
+  }
+  for (int k = 0; k < nt; k++) {
+    int g = Th[k].label - 1;
+    C11[k]=Cg(g,0); C22[k]=Cg(g,1); C12[k]=Cg(g,2); C16[k]=Cg(g,3); C26[k]=Cg(g,4); C66[k]=Cg(g,5);
+    P11a[k]=Pg(g,0); P22a[k]=Pg(g,1); P12a[k]=Pg(g,2);
+    P11b[k]=Pg(g,3); P22b[k]=Pg(g,4); P12b[k]=Pg(g,5);
+    P11c[k]=Pg(g,6); P22c[k]=Pg(g,7); P12c[k]=Pg(g,8);
+    s1x[k]=Sg(g,0); s1y[k]=Sg(g,1); s2x[k]=Sg(g,2); s2y[k]=Sg(g,3); s3x[k]=Sg(g,4); s3y[k]=Sg(g,5);
+    G11[k]=Gg(g,0); G22[k]=Gg(g,1); G33[k]=Gg(g,2); G12[k]=Gg(g,3); G13[k]=Gg(g,4); G23[k]=Gg(g,5);
+    K11[k]=Kg(g,0); K22[k]=Kg(g,1); K33[k]=Kg(g,2); K12[k]=Kg(g,3); K13[k]=Kg(g,4); K23[k]=Kg(g,5);
+  }
+}
+Ph c11, c22, c12, c16, c26, c66;
+c11[] = C11; c22[] = C22; c12[] = C12; c16[] = C16; c26[] = C26; c66[] = C66;
+
+// ---------------- history (P0 arrays) ---------------------------------
+real[int] pa(nt), pb(nt), pc(nt), dpa(nt), dpb(nt), dpc(nt);
+real[int] pathE(nt), pathP(nt), Drate(nt); pathE = 0; pathP = 0; Drate = 0;   // slip path (effective, physical) and last dissipation rate
+real[int] rhoS(nt), rhoG(nt), kp1(nt), kp2(nt), dva(nt), dvb(nt), dvc(nt), wst(nt), dwst(nt);
+pa = 0; pb = 0; pc = 0; dpa = 0; dpb = 0; dpc = 0; rhoS = rho0; rhoG = 0;
+kp1 = 0; kp2 = 0; dva = 0; dvb = 0; dvc = 0; wst = 0; dwst = 0;
+Ph hp11, hp22, hp12, omp, kq1, kq2, Ht;   // plastic fields used in assembly
+Ph E11, E22, E12, WU, TH, GT1, GT2, PHc, Tc;   // centroid kinematics / state
+Ph Hy1, Hx2;                                    // centroid du1/dy, du2/dx (with E11 = du1/dx, E22 = du2/dy)
+// finite-deformation plastic state: committed Fp (2x2, global reference-lattice frame) and trial Fp
+real[int] fp11(nt), fp12(nt), fp21(nt), fp22(nt), tf11(nt), tf12(nt), tf21(nt), tf22(nt);
+fp11 = 1; fp12 = 0; fp21 = 0; fp22 = 1; tf11 = 1; tf12 = 0; tf21 = 0; tf22 = 1;
+// s (x) n per system (n = s rotated by +90 deg)
+real[int] A11a(nt), A12a(nt), A21a(nt), A22a(nt), A11b(nt), A12b(nt), A21b(nt), A22b(nt), A11c(nt), A12c(nt), A21c(nt), A22c(nt);
+A11a = s1x .* s1y; A11a *= -1; A12a = s1x .* s1x; A21a = s1y .* s1y; A21a *= -1; A22a = s1x .* s1y;
+A11b = s2x .* s2y; A11b *= -1; A12b = s2x .* s2x; A21b = s2y .* s2y; A21b *= -1; A22b = s2x .* s2y;
+A11c = s3x .* s3y; A11c *= -1; A12c = s3x .* s3x; A21c = s3y .* s3y; A21c *= -1; A22c = s3x .* s3y;
+
+// ---------------- A: smooth initial orientation field -----------------
+if (isA) {
+  real ls = 0.04;
+  solve sm(th0s, xi) = int2d(Th)(th0s*xi + ls*ls*(dx(th0s)*dx(xi) + dy(th0s)*dy(xi))) - int2d(Th)(thg0*xi);
+} else {
+  th0s = 0;
+}
+
+// ---------------- operators -------------------------------------------
+macro symv(a1,a2) [dx(a1), dy(a2), 0.5*(dy(a1)+dx(a2))] //
+macro rotv(a1,a2) (0.5*(dx(a2)-dy(a1))) //
+macro sig11(e1,e2,e3) (c11*(e1) + c12*(e2) + 2*c16*(e3)) //
+macro sig22(e1,e2,e3) (c12*(e1) + c22*(e2) + 2*c26*(e3)) //
+macro sig12(e1,e2,e3) (c16*(e1) + c26*(e2) + 2*c66*(e3)) //
+macro dbl(e1,e2,e3,f1,f2,f3) (sig11(e1,e2,e3)*(f1) + sig22(e1,e2,e3)*(f2) + 2*sig12(e1,e2,e3)*(f3)) //
+
+real curvK = isA ? 0. : Acurv;
+// true linear operator (elastic + Cosserat coupling + F curvature)
+varf vK([u1,u2,th],[v1,v2,ze]) =
+  int2d(Th)( dbl(dx(u1),dy(u2),0.5*(dy(u1)+dx(u2)), dx(v1),dy(v2),0.5*(dy(v1)+dx(v2)))
+           + 4*muc*(rotv(u1,u2) - th)*(rotv(v1,v2) - ze)
+           + curvK*(dx(th)*dx(ze) + dy(th)*dy(ze)) );
+// approximate tangent: GB-spin-relaxed coupling (A) and KWC secant stiffness
+Ph mucE = muc, H11 = 0, H12 = 0, H22 = 0, cspin = 0;
+varf vKa([u1,u2,th],[v1,v2,ze]) =
+  int2d(Th)( dbl(dx(u1),dy(u2),0.5*(dy(u1)+dx(u2)), dx(v1),dy(v2),0.5*(dy(v1)+dx(v2)))
+           + 4*muc*(rotv(u1,u2) - th)*(rotv(v1,v2) - ze)
+           + curvK*(dx(th)*dx(ze) + dy(th)*dy(ze))
+           + H11*dx(th)*dx(ze) + H12*(dx(th)*dy(ze) + dy(th)*dx(ze)) + H22*dy(th)*dy(ze) );
+varf vMu([u1,u2,th],[v1,v2,ze]) = int2d(Th)(rho*(u1*v1 + u2*v2));
+varf vMt([u1,u2,th],[v1,v2,ze]) = int2d(Th)(rho*jz*th*ze);
+varf vBC([u1,u2,th],[v1,v2,ze]) = on(1, u1 = 0, u2 = 0);
+
+real c0 = 4./(dt*dt), c1 = 4./dt;
+matrix Mu = vMu(Wh, Wh), Mt = vMt(Wh, Wh);
+matrix Mall = Mu + Mt;
+matrix Ktrue = vK(Wh, Wh);
+matrix Aeff, Kpl;
+bool usePlTan = false;
+varf vR([u1,u2,th],[q]) = int2d(Th)((rotv(u1,u2) - th)*q);
+varf vDs([a],[q]) = int2d(Th)(cspin*a*q);
+func int buildA() {
+  matrix K = vKa(Wh, Wh);
+  if (usePlTan) K = K + (-1.)*Kpl;
+  matrix Ab = vBC(Wh, Wh);
+  Aeff = K + c0*Mu;
+  Aeff = Aeff + c0*Mt;
+  Aeff = Aeff + Ab;
+  set(Aeff, solver = sparsesolver);
+  return 0;
+}
+
+// loads
+real Tload = 0;
+real dxl = 0., dyl = 1.; if (ldir == "comp") { dxl = -1.; dyl = 0.; }
+if (ldir == "combo") { dxl = -1.; dyl = ampS/amp; }   // traction = amp*env*(-1, ampS/amp) = (-amp, +ampS) GPa
+func real envelope(real t) {
+  real s, r = 0;
+  if (t < 2) { s = t/2; r = 6*s^5 - 15*s^4 + 10*s^3; }
+  else if (t < 5) r = 1;
+  else if (t < 7) { s = (t-5)/2; r = 1 - (6*s^5 - 15*s^4 + 10*s^3); }
+  return r;
+}
+varf vF([u1,u2,th],[v1,v2,ze]) =
+  int1d(Th, 3)(Tload*(dxl*v1 + dyl*v2))
+  + int2d(Th)( dbl(hp11,hp22,hp12, dx(v1),dy(v2),0.5*(dy(v1)+dx(v2)))
+             + 4*muc*omp*(rotv(v1,v2) - ze)
+             + curvK*(kq1*dx(ze) + kq2*dy(ze)) );
+// KWC couple stress correction (A): -(m_K(grad theta_tot) - Ht grad th).grad ze
+macro gtx() (dx(th0s)+dx(th)) //
+macro gty() (dy(th0s)+dy(th)) //
+macro gphi() (-2*(phi + log(1 - phi))) //   (phi is clamped to [0, phimax] at the nodes after every update)
+macro mKfac() (f0*(sK*gphi/sqrt(gtx^2+gty^2+dlt^2) + eK^2)) //
+varf vKWC([a1,a2,a3],[v1,v2,ze]) =
+  int2d(Th)( -(mKfac*gtx - Ht*dx(th))*dx(ze) - (mKfac*gty - Ht*dy(th))*dy(ze) );
+varf vBCr([u1,u2,th],[v1,v2,ze]) = on(1, u1 = 0, u2 = 0);
+
+// precomputed operators: plastic P0 fields -> RHS, unit traction -> RHS
+macro F1() dx(v1) //
+macro F2() dy(v2) //
+macro F3() (0.5*(dy(v1)+dx(v2))) //
+varf vB1([a], [v1,v2,ze]) = int2d(Th)(a*(c11*F1 + c12*F2 + 2*c16*F3));
+varf vB2([a], [v1,v2,ze]) = int2d(Th)(a*(c12*F1 + c22*F2 + 2*c26*F3));
+varf vB3([a], [v1,v2,ze]) = int2d(Th)(a*(2*c16*F1 + 2*c26*F2 + 4*c66*F3));
+varf vBw([a], [v1,v2,ze]) = int2d(Th)(4*muc*a*(rotv(v1,v2) - ze));
+varf vBk1([a], [v1,v2,ze]) = int2d(Th)(curvK*a*dx(ze));
+varf vBk2([a], [v1,v2,ze]) = int2d(Th)(curvK*a*dy(ze));
+matrix B1 = vB1(Ph, Wh), B2 = vB2(Ph, Wh), B3 = vB3(Ph, Wh), Bw = vBw(Ph, Wh), Bk1 = vBk1(Ph, Wh), Bk2 = vBk2(Ph, Wh);
+varf vT1([a1,a2,a3],[v1,v2,ze]) = int1d(Th, 3)(dxl*v1 + dyl*v2);
+real[int] Fun = vT1(0, Wh);
+varf vG1([a], [v1,v2,ze]) = int2d(Th)(a*dx(ze));
+varf vG2([a], [v1,v2,ze]) = int2d(Th)(a*dy(ze));
+matrix Bg1 = vG1(Ph, Wh), Bg2 = vG2(Ph, Wh);
+// element-mean finite-strain correction: r = sum_e A_e dDpsi/dFbar : grad v + dDpsi/dthbar ze  (P0 coefficient times test)
+varf vC11([a], [v1,v2,ze]) = int2d(Th)(a*dx(v1));
+varf vC12([a], [v1,v2,ze]) = int2d(Th)(a*dy(v1));
+varf vC21([a], [v1,v2,ze]) = int2d(Th)(a*dx(v2));
+varf vC22([a], [v1,v2,ze]) = int2d(Th)(a*dy(v2));
+varf vCth([a], [v1,v2,ze]) = int2d(Th)(a*ze);
+matrix BC11 = vC11(Ph, Wh), BC12 = vC12(Ph, Wh), BC21 = vC21(Ph, Wh), BC22 = vC22(Ph, Wh), BCth = vCth(Ph, Wh);
+real[int] rpl(Wh.ndof);
+
+// heat
+varf vTh(T, xi) = int2d(Th)(rhoC/dt*T*xi + kth*(dx(T)*dx(xi) + dy(T)*dy(xi)));
+matrix ATh = vTh(Vh1, Vh1, solver = sparsesolver);
+Ph Dsrc;
+varf vTr(T, xi) = int2d(Th)(rhoC/dt*Tn*xi + Dsrc/dt*xi);
+
+// ---------------- local constitutive update (array based) --------------
+real[int] ta(nt), tb(nt), tcc(nt), tauc(nt), etad(nt), tmp(nt), tmp2(nt), xa(nt), lx(nt);
+real[int] ga(nt), gb(nt), gc(nt), dga(nt), dgb(nt), dgc(nt), ra(nt), rb(nt), rc(nt), wloc(nt);
+real[int] e11(nt), e22(nt), e12(nt), wu(nt), thc(nt), gt1(nt), gt2(nt), phic(nt), Tcel(nt);
+real[int] m11(nt), m12(nt), m13(nt), m21(nt), m22(nt), m23(nt), m31(nt), m32(nt), m33(nt), det(nt), da(nt), db(nt), dc(nt);
+real[int] dpmax(nt), nua(nt), nub(nt), nuc(nt), one(nt); one = 1;
+// GB spin eliminated exactly: w_after = (1-beta) w_trial, beta = dt k/(1 + dt k), k = 2 muc (1-phi)^2/eta*
+real[int] betaS(nt), omb(nt), wtr(nt), Gx11(nt), Gx22(nt), Gx33(nt), Gx12(nt), Gx13(nt), Gx23(nt);
+betaS = 0; omb = 1;
+
+// magnitude rate |gd| and d|gd|/d|tau| for stress t, strength factor f
+func int flow(real[int] & t, real f, real[int] & gd, real[int] & dgd) {
+  xa = abs(t); xa = xa ./ tauc; xa *= 1./f;
+  tmp = xa; tmp -= 300.; tmp = abs(tmp); xa += 300.; xa -= tmp; xa *= 0.5;   // min(x, 300)
+  tmp = xa; tmp += 1e-300; lx = log(tmp);
+  tmp = lx; tmp *= mexp; real[int] xm = exp(tmp);
+  tmp = lx; tmp *= (mexp - 1); real[int] xm1 = exp(tmp);
+  real[int] cc = etad ./ tauc; cc *= 1./f;
+  real[int] Dn = cc .* xm1; Dn += 1./g0;
+  gd = xm ./ Dn;
+  real[int] num = cc .* xm1; num = num .* xm1; tmp = xm1; tmp *= mexp/g0; num += tmp;
+  real[int] den = Dn .* Dn;
+  dgd = num ./ den; tmp = tauc; tmp *= f; dgd = dgd ./ tmp;
+  return 0;
+}
+func int sgn(real[int] & t, real[int] & s) { tmp = abs(t); tmp += 1e-300; s = t ./ tmp; return 0; }
+
+// solve (I + dt*diag(dg)*G) d = -r  for all elements (Cramer)
+func int solve3(real[int] & Ga, real[int] & Gb, real[int] & Gc, real[int] & Gab, real[int] & Gac, real[int] & Gbc) {
+  m11 = dga .* Ga; m11 *= dt; m11 += 1;   m12 = dga .* Gab; m12 *= dt;   m13 = dga .* Gac; m13 *= dt;
+  m21 = dgb .* Gab; m21 *= dt;   m22 = dgb .* Gb; m22 *= dt; m22 += 1;   m23 = dgb .* Gbc; m23 *= dt;
+  m31 = dgc .* Gac; m31 *= dt;   m32 = dgc .* Gbc; m32 *= dt;   m33 = dgc .* Gc; m33 *= dt; m33 += 1;
+  real[int] A1 = m22 .* m33; tmp = m23 .* m32; A1 -= tmp;
+  real[int] A2 = m21 .* m33; tmp = m23 .* m31; A2 -= tmp;
+  real[int] A3 = m21 .* m32; tmp = m22 .* m31; A3 -= tmp;
+  det = m11 .* A1; tmp = m12 .* A2; det -= tmp; tmp = m13 .* A3; det += tmp;
+  // d = M^-1 (-r) via adjugate
+  real[int] i11 = A1, i12(nt), i13(nt), i21(nt), i22(nt), i23(nt), i31(nt), i32(nt), i33(nt);
+  i12 = m13 .* m32; tmp = m12 .* m33; i12 -= tmp;
+  i13 = m12 .* m23; tmp = m13 .* m22; i13 -= tmp;
+  i21 = -A2;
+  i22 = m11 .* m33; tmp = m13 .* m31; i22 -= tmp;
+  i23 = m13 .* m21; tmp = m11 .* m23; i23 -= tmp;
+  i31 = A3;
+  i32 = m12 .* m31; tmp = m11 .* m32; i32 -= tmp;
+  i33 = m11 .* m22; tmp = m12 .* m21; i33 -= tmp;
+  da = i11 .* ra; tmp = i12 .* rb; da += tmp; tmp = i13 .* rc; da += tmp; da = da ./ det; da *= -1;
+  db = i21 .* ra; tmp = i22 .* rb; db += tmp; tmp = i23 .* rc; db += tmp; db = db ./ det; db *= -1;
+  dc = i31 .* ra; tmp = i32 .* rb; dc += tmp; tmp = i33 .* rc; dc += tmp; dc = dc ./ det; dc *= -1;
+  return 0;
+}
+real[int] cl1(nt), cl2(nt);
+func int clampv(real[int] & v, real[int] & vmax) {
+  // v = min(v, M);  v = max(v, -M)   (vectorized)
+  cl1 = v; cl1 -= vmax; cl1 = abs(cl1); cl2 = v; cl2 += vmax; cl2 -= cl1; cl2 *= 0.5; v = cl2;
+  cl1 = v; cl1 += vmax; cl1 = abs(cl1); cl2 = v; cl2 -= vmax; cl2 += cl1; cl2 *= 0.5; v = cl2;
+  return 0;
+}
+
+// ---------------- finite-deformation element stresses -------------------
+real[int] hy1(nt), hx2(nt);                                   // centroid du1/dy, du2/dx
+real[int] fi11(nt), fi12(nt), fi21(nt), fi22(nt);             // Fp^-1 (trial)
+real[int] ub11(nt), ub12(nt), ub21(nt), ub22(nt);             // Ubar = R^T Fbar Fp^-1
+real[int] Sb11(nt), Sb22(nt), Sb12(nt), Eb11(nt), Eb22(nt), Eb12(nt), aa(nt);   // 2nd PK in the Cosserat frame, Green strain, skew
+real[int] Pi11(nt), Pi12(nt), Pi21(nt), Pi22(nt);             // Pi = dpsi/dUbar
+real[int] PF11(nt), PF12(nt), PF21(nt), PF22(nt), psth(nt), psiF(nt);   // dpsi/dFbar, dpsi/dthbar, psi (finite)
+real[int] PL11(nt), PL12(nt), PL21(nt), PL22(nt), plth(nt), psiL(nt);   // the same for the quadratic (small-strain) energy
+real[int] dP11(nt), dP12(nt), dP21(nt), dP22(nt), dPth(nt);   // correction = finite - quadratic
+real[int] Mn11(nt), Mn12(nt), Mn21(nt), Mn22(nt), tstar(nt), kspin(nt); kspin = 0;   // Mandel stress Ubar^T Pi, spin drive
+real[int] cth(nt), sth(nt), q2(nt), cE(nt), sE(nt), L11(nt), L12(nt), L21(nt), L22(nt), dtf(nt);
+// trial Fp = exp(dLp) Fp_n, dLp = sum dgamma_a s_a(x)n_a + dw* What  (traceless: exact exp via q^2 = -det dLp)
+func int trialFp() {
+  L11 = A11a .* dpa; tmp = A11b .* dpb; L11 += tmp; tmp = A11c .* dpc; L11 += tmp;
+  L12 = A12a .* dpa; tmp = A12b .* dpb; L12 += tmp; tmp = A12c .* dpc; L12 += tmp; L12 -= dwst;
+  L21 = A21a .* dpa; tmp = A21b .* dpb; L21 += tmp; tmp = A21c .* dpc; L21 += tmp; L21 += dwst;
+  L22 = A22a .* dpa; tmp = A22b .* dpb; L22 += tmp; tmp = A22c .* dpc; L22 += tmp;
+  q2 = L11 .* L11; tmp = L12 .* L21; q2 += tmp;
+  tmp = q2 .* q2; cE = tmp; cE *= 1./24; tmp2 = q2; tmp2 *= 0.5; cE += tmp2; cE += 1;      // cosh(q)
+  sE = tmp; sE *= 1./120; tmp2 = q2; tmp2 *= 1./6; sE += tmp2; sE += 1;                   // sinh(q)/q
+  L11 = L11 .* sE; L12 = L12 .* sE; L21 = L21 .* sE; L22 = L22 .* sE; L11 += cE; L22 += cE;  // exp(dLp)
+  tf11 = L11 .* fp11; tmp = L12 .* fp21; tf11 += tmp;
+  tf12 = L11 .* fp12; tmp = L12 .* fp22; tf12 += tmp;
+  tf21 = L21 .* fp11; tmp = L22 .* fp21; tf21 += tmp;
+  tf22 = L21 .* fp12; tmp = L22 .* fp22; tf22 += tmp;
+  return 0;
+}
+// stresses at the element-mean kinematics (e11, hy1, hx2, e22, thc) and the trial Fp
+func int finiteStress() {
+  dtf = tf11 .* tf22; tmp = tf12 .* tf21; dtf -= tmp;
+  fi11 = tf22 ./ dtf; fi22 = tf11 ./ dtf; fi12 = tf12 ./ dtf; fi12 *= -1; fi21 = tf21 ./ dtf; fi21 *= -1;
+  real[int] F11 = e11 + one, F22 = e22 + one;
+  real[int] A11 = F11 .* fi11; tmp = hy1 .* fi21; A11 += tmp;
+  real[int] A12 = F11 .* fi12; tmp = hy1 .* fi22; A12 += tmp;
+  real[int] A21 = hx2 .* fi11; tmp = F22 .* fi21; A21 += tmp;
+  real[int] A22 = hx2 .* fi12; tmp = F22 .* fi22; A22 += tmp;
+  cth = cos(thc); sth = sin(thc);
+  ub11 = cth .* A11; tmp = sth .* A21; ub11 += tmp;
+  ub12 = cth .* A12; tmp = sth .* A22; ub12 += tmp;
+  ub21 = cth .* A21; tmp = sth .* A11; ub21 -= tmp;
+  ub22 = cth .* A22; tmp = sth .* A12; ub22 -= tmp;
+  Eb11 = ub11 .* ub11; tmp = ub21 .* ub21; Eb11 += tmp; Eb11 -= 1; Eb11 *= 0.5;
+  Eb22 = ub12 .* ub12; tmp = ub22 .* ub22; Eb22 += tmp; Eb22 -= 1; Eb22 *= 0.5;
+  Eb12 = ub11 .* ub12; tmp = ub21 .* ub22; Eb12 += tmp; Eb12 *= 0.5;
+  Sb11 = C11 .* Eb11; tmp = C12 .* Eb22; Sb11 += tmp; tmp = C16 .* Eb12; tmp *= 2; Sb11 += tmp;
+  Sb22 = C12 .* Eb11; tmp = C22 .* Eb22; Sb22 += tmp; tmp = C26 .* Eb12; tmp *= 2; Sb22 += tmp;
+  Sb12 = C16 .* Eb11; tmp = C26 .* Eb22; Sb12 += tmp; tmp = C66 .* Eb12; tmp *= 2; Sb12 += tmp;
+  aa = ub21 - ub12; aa *= 0.5;
+  psiF = Sb11 .* Eb11; tmp = Sb22 .* Eb22; psiF += tmp; tmp = Sb12 .* Eb12; tmp *= 2; psiF += tmp; psiF *= 0.5;
+  tmp = aa .* aa; tmp *= 2*muc; psiF += tmp;
+  real[int] ska = aa; ska *= 2*muc;
+  Pi11 = ub11 .* Sb11; tmp = ub12 .* Sb12; Pi11 += tmp;
+  Pi12 = ub11 .* Sb12; tmp = ub12 .* Sb22; Pi12 += tmp; Pi12 -= ska;
+  Pi21 = ub21 .* Sb11; tmp = ub22 .* Sb12; Pi21 += tmp; Pi21 += ska;
+  Pi22 = ub21 .* Sb12; tmp = ub22 .* Sb22; Pi22 += tmp;
+  // dpsi/dFbar = R Pi Fp^-T
+  real[int] B11 = cth .* Pi11; tmp = sth .* Pi21; B11 -= tmp;
+  real[int] B12 = cth .* Pi12; tmp = sth .* Pi22; B12 -= tmp;
+  real[int] B21 = sth .* Pi11; tmp = cth .* Pi21; B21 += tmp;
+  real[int] B22 = sth .* Pi12; tmp = cth .* Pi22; B22 += tmp;
+  PF11 = B11 .* fi11; tmp = B12 .* fi12; PF11 += tmp;
+  PF12 = B11 .* fi21; tmp = B12 .* fi22; PF12 += tmp;
+  PF21 = B21 .* fi11; tmp = B22 .* fi12; PF21 += tmp;
+  PF22 = B21 .* fi21; tmp = B22 .* fi22; PF22 += tmp;
+  // dpsi/dtheta = -Pi : (What Ubar)
+  psth = Pi11 .* ub21; tmp = Pi12 .* ub22; psth += tmp; tmp = Pi21 .* ub11; psth -= tmp; tmp = Pi22 .* ub12; psth -= tmp;
+  // Mandel stress M = Ubar^T Pi
+  Mn11 = ub11 .* Pi11; tmp = ub21 .* Pi21; Mn11 += tmp;
+  Mn12 = ub11 .* Pi12; tmp = ub21 .* Pi22; Mn12 += tmp;
+  Mn21 = ub12 .* Pi11; tmp = ub22 .* Pi21; Mn21 += tmp;
+  Mn22 = ub12 .* Pi12; tmp = ub22 .* Pi22; Mn22 += tmp;
+  // quadratic energy with Hp = Fp - I (what the pointwise P2 operator integrates)
+  real[int] l11 = e11 - tf11; l11 += 1; real[int] l22 = e22 - tf22; l22 += 1;
+  real[int] l12 = hy1 + hx2; tmp = tf12 + tf21; l12 -= tmp; l12 *= 0.5;
+  real[int] wl = hx2 - hy1; tmp = tf21 - tf12; wl -= tmp; wl *= 0.5; wl -= thc;
+  real[int] q11 = C11 .* l11; tmp = C12 .* l22; q11 += tmp; tmp = C16 .* l12; tmp *= 2; q11 += tmp;
+  real[int] q22 = C12 .* l11; tmp = C22 .* l22; q22 += tmp; tmp = C26 .* l12; tmp *= 2; q22 += tmp;
+  real[int] q12 = C16 .* l11; tmp = C26 .* l22; q12 += tmp; tmp = C66 .* l12; tmp *= 2; q12 += tmp;
+  psiL = q11 .* l11; tmp = q22 .* l22; psiL += tmp; tmp = q12 .* l12; tmp *= 2; psiL += tmp; psiL *= 0.5;
+  tmp = wl .* wl; tmp *= 2*muc; psiL += tmp;
+  real[int] skl = wl; skl *= 2*muc;
+  PL11 = q11; PL22 = q22; PL12 = q12 - skl; PL21 = q12 + skl;
+  plth = wl; plth *= -4*muc;
+  dP11 = PF11 - PL11; dP12 = PF12 - PL12; dP21 = PF21 - PL21; dP22 = PF22 - PL22; dPth = psth - plth;
+  return 0;
+}
+// resolved shear stresses tau_a = M : s_a(x)n_a and the spin drive tau* = M : What, at the current increments
+func int taus() {
+  trialFp(); finiteStress();
+  ta = Mn11 .* A11a; tmp = Mn12 .* A12a; ta += tmp; tmp = Mn21 .* A21a; ta += tmp; tmp = Mn22 .* A22a; ta += tmp;
+  tb = Mn11 .* A11b; tmp = Mn12 .* A12b; tb += tmp; tmp = Mn21 .* A21b; tb += tmp; tmp = Mn22 .* A22b; tb += tmp;
+  tcc = Mn11 .* A11c; tmp = Mn12 .* A12c; tcc += tmp; tmp = Mn21 .* A21c; tcc += tmp; tmp = Mn22 .* A22c; tcc += tmp;
+  tstar = Mn21 - Mn12;
+  wloc = aa;
+  return 0;
+}
+// curvature-mode stresses nu_a = A (grad th - kp - sum dv s/l) . s_a / l   (F)
+func int nus() {
+  real[int] q1 = gt1, q2 = gt2;
+  q1 -= kp1; q2 -= kp2;
+  tmp = dva .* s1x; tmp2 = dvb .* s2x; tmp += tmp2; tmp2 = dvc .* s3x; tmp += tmp2; tmp *= 1./lmode; q1 -= tmp;
+  tmp = dva .* s1y; tmp2 = dvb .* s2y; tmp += tmp2; tmp2 = dvc .* s3y; tmp += tmp2; tmp *= 1./lmode; q2 -= tmp;
+  nua = q1 .* s1x; tmp = q2 .* s1y; nua += tmp; nua *= Acurv/lmode;
+  nub = q1 .* s2x; tmp = q2 .* s2y; nub += tmp; nub *= Acurv/lmode;
+  nuc = q1 .* s3x; tmp = q2 .* s3y; nuc += tmp; nuc *= Acurv/lmode;
+  return 0;
+}
+
+int nlocal = 30;
+int nref = atoi(arg("-nref", "10"));
+real[int] rn(nt), rnold(nt), bad(nt), good(nt), pda(nt), pdb(nt), pdc(nt);
+// per-element backtracking: where the residual grew, go halfway back and skip the Newton step
+func int backtrack(real[int] & xa0, real[int] & xb0, real[int] & xc0, int it) {
+  rn = abs(ra); tmp = abs(rb); rn += tmp; tmp = abs(rc); rn += tmp;
+  if (it == 0) { bad = 0; } else {
+    tmp = rn; tmp -= rnold; tmp2 = abs(tmp); tmp += tmp2; tmp2 *= 2; tmp2 += 1e-300; bad = tmp ./ tmp2;   // 1 where rn > rnold
+  }
+  good = one - bad;
+  return 0;
+}
+func int setHp() {
+  tmp = tf11; tmp -= 1; hp11[] = tmp; tmp = tf22; tmp -= 1; hp22[] = tmp;
+  tmp = tf12 + tf21; tmp *= 0.5; hp12[] = tmp; tmp = tf21 - tf12; tmp *= 0.5; omp[] = tmp;
+  return 0;
+}
+real locres = 0; int nlocit = 0;
+func int kin() {   // centroid (= element-mean) kinematics of the current u, theta
+  E11 = dx(u1); E22 = dy(u2); E12 = 0.5*(dy(u1) + dx(u2)); WU = 0.5*(dx(u2) - dy(u1)); TH = th;
+  Hy1 = dy(u1); Hx2 = dx(u2);
+  GT1 = dx(th); GT2 = dy(th);
+  e11 = E11[]; e22 = E22[]; e12 = E12[]; wu = WU[]; thc = TH[]; gt1 = GT1[]; gt2 = GT2[]; hy1 = Hy1[]; hx2 = Hx2[];
+  return 0;
+}
+func int localUpdate() {
+  kin();
+  real[int] sa(nt), sb(nt), sc(nt);
+  // --- slip ---
+  real rsp = 0;
+  for (int it = 0; it < nlocal; it++) {
+    taus();
+    if (isA) {   // GB spin: Newton step on  dw* - dt tau*/eta_s = 0,  d tau*/d dw* ~ -4 mu_c
+      tmp = tstar .* kspin; tmp -= dwst; rsp = tmp.linfty; tmp2 = kspin; tmp2 *= 4*muc; tmp2 += 1; tmp = tmp ./ tmp2; dwst += tmp;
+      tmp *= 2*muc; ta += tmp; tb += tmp; tcc += tmp;   // first-order update of tau_a for the new spin (d tau_a/d w* = 2 mu_c)
+    }
+    flow(ta, fs1, ga, dga); flow(tb, fs2, gb, dgb); flow(tcc, fs3, gc, dgc);
+    sgn(ta, sa); sgn(tb, sb); sgn(tcc, sc);
+    ra = sa .* ga; ra *= -dt; ra += dpa;
+    rb = sb .* gb; rb *= -dt; rb += dpb;
+    rc = sc .* gc; rc *= -dt; rc += dpc;
+    backtrack(dpa, dpb, dpc, it);
+    locres = max(ra.linfty, rb.linfty, rc.linfty, rsp);
+    if (it > 0) {   // bad elements: halve the last step
+      tmp = dpa - pda; tmp *= 0.5; tmp = tmp .* bad; dpa -= tmp;
+      tmp = dpb - pdb; tmp *= 0.5; tmp = tmp .* bad; dpb -= tmp;
+      tmp = dpc - pdc; tmp *= 0.5; tmp = tmp .* bad; dpc -= tmp;
+    }
+    tmp = rn .* good; tmp2 = rnold .* bad; rnold = tmp + tmp2;
+    tmp = dpa .* good; tmp2 = pda .* bad; pda = tmp + tmp2;
+    tmp = dpb .* good; tmp2 = pdb .* bad; pdb = tmp + tmp2;
+    tmp = dpc .* good; tmp2 = pdc .* bad; pdc = tmp + tmp2;
+    solve3(Gx11, Gx22, Gx33, Gx12, Gx13, Gx23);
+    da = da .* good; db = db .* good; dc = dc .* good;
+    if (verbose > 1) { int im = ra.imax; real[int] q = abs(ra); im = q.imax;
+      cout << "    loc " << it << " el " << im << " ra " << ra[im] << " dpa " << dpa[im] << " ta " << ta[im] << " tb " << tb[im] << " tc " << tcc[im]
+           << " ga " << ga[im] << " dga " << dga[im] << " da " << da[im] << " db " << db[im] << " dc " << dc[im] << " det " << det[im] << " tauc " << tauc[im] << " etad " << etad[im] << endl; }
+    dpa += da; dpb += db; dpc += dc;
+    // drag-limited bound
+    dpmax = abs(ta); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dpa, dpmax);
+    dpmax = abs(tb); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dpb, dpmax);
+    dpmax = abs(tcc); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dpc, dpmax);
+    nlocit = it + 1;
+    if (locres < 1e-13) break;
+  }
+  // --- plastic curvature (F) ---
+  if (!isA) {
+    for (int it = 0; it < nlocal; it++) {
+      nus();
+      flow(nua, fs1, ga, dga); flow(nub, fs2, gb, dgb); flow(nuc, fs3, gc, dgc);
+      sgn(nua, sa); sgn(nub, sb); sgn(nuc, sc);
+      ra = sa .* ga; ra *= -dt; ra += dva;
+      rb = sb .* gb; rb *= -dt; rb += dvb;
+      rc = sc .* gc; rc *= -dt; rc += dvc;
+      solve3(K11, K22, K33, K12, K13, K23);
+      dva += da; dvb += db; dvc += dc;
+      dpmax = abs(nua); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dva, dpmax);
+      dpmax = abs(nub); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dvb, dpmax);
+      dpmax = abs(nuc); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dvc, dpmax);
+      if (max(ra.linfty, rb.linfty, rc.linfty) < 1e-12) break;
+    }
+  }
+  // --- plastic fields for assembly: Hp = Fp_trial - I, and the finite-strain correction at this state ---
+  taus(); setHp();
+  if (!isA) {
+    real[int] q1 = kp1, q2 = kp2;
+    tmp = dva .* s1x; tmp2 = dvb .* s2x; tmp += tmp2; tmp2 = dvc .* s3x; tmp += tmp2; tmp *= 1./lmode; q1 += tmp;
+    tmp = dva .* s1y; tmp2 = dvb .* s2y; tmp += tmp2; tmp2 = dvc .* s3y; tmp += tmp2; tmp *= 1./lmode; q2 += tmp;
+    kq1[] = q1; kq2[] = q2;
+  }
+  return 0;
+}
+
+// strength and drag from state at start of step
+func int strength() {
+  Tc = T; Tcel = Tc[];
+  real[int] rt = rhoS + rhoG;
+  tmp = rt; tauc = sqrt(tmp); tauc *= lamT*mu*b; tauc += tau0;
+  tmp = Tcel; tmp -= T0; tmp *= -alphaMu; tmp += 1; tauc = tauc .* tmp;
+  etad = Tcel; etad *= B0/T0; tmp = rt; tmp *= b*b; etad = etad ./ tmp;
+  // GB spin friction eta_s = 2 eta*_0/(1-phi)^2:  dw* = dt tau*/eta_s;  k = 4 mu_c/eta_s;  beta = dt k/(1 + dt k)
+  if (isA) { PHc = phi; real[int] kk = one - PHc[]; kk = kk .* kk; kspin = kk; kspin *= dt/(2*etaStar0);
+             kk *= 2*muc*dt/etaStar0; tmp = kk; tmp += 1; betaS = kk ./ tmp; }
+  omb = one - betaS;
+  tmp = betaS; tmp *= muc;
+  Gx11 = G11 - tmp; Gx22 = G22 - tmp; Gx33 = G33 - tmp; Gx12 = G12 - tmp; Gx13 = G13 - tmp; Gx23 = G23 - tmp;
+  return 0;
+}
+
+// ---------------- state vectors and energies ---------------------------
+real[int] U(Wh.ndof), V(Wh.ndof), Acc(Wh.ndof), Un(Wh.ndof), rhs(Wh.ndof), rin(Wh.ndof), Uold(Wh.ndof);
+U = 0; V = 0; Acc = 0;
+func int plasticRHS() {
+  rhs = Fun; rhs *= Tload;
+  rpl = B1*hp11[]; rhs += rpl; rpl = B2*hp22[]; rhs += rpl; rpl = B3*hp12[]; rhs += rpl; rpl = Bw*omp[]; rhs += rpl;
+  if (!isA) { rpl = Bk1*kq1[]; rhs += rpl; rpl = Bk2*kq2[]; rhs += rpl; }
+  return 0;
+}
+varf vBCm([u1,u2,th],[v1,v2,ze]) = on(1, u1 = 1, u2 = 1);
+real[int] bcm = vBCm(0, Wh, tgv = 1);
+real[int] mask(Wh.ndof); mask = 1; mask -= bcm;
+// KWC couple stress from element-mean phi^2 (consistent with the energy)
+real[int] gt0x(nt), gt0y(nt), ph2m(nt), gm(nt), mxk(nt), myk(nt), areas(nt);
+{ Ph g0x = dx(th0s), g0y = dy(th0s); gt0x = g0x[]; gt0y = g0y[];
+  varf va(un, w) = int2d(Th)(w); areas = va(0, Ph); }
+varf vph2(un, w) = int2d(Th)(phi^2*w);
+varf vgph(un, w) = int2d(Th)(gphi*w);
+// element means of phi^2 (GND weighting) and of the log coupling g(phi) (KWC couple stress)
+func int updatePhi2() { ph2m = vph2(0, Ph); ph2m = ph2m ./ areas; gm = vgph(0, Ph); gm = gm ./ areas; return 0; }
+func int kwcStress() {
+  real[int] gx = gt0x + gt1; real[int] gy = gt0y + gt2;
+  real[int] nr = gx .* gx; tmp = gy .* gy; nr += tmp; nr += dlt*dlt; nr = sqrt(nr);
+  real[int] fac = gm ./ nr; fac *= sK; fac += eK*eK; fac *= f0;
+  mxk = fac .* gx; myk = fac .* gy;
+  return 0;
+}
+func int residual() {
+  plasticRHS(); rhs += rin;
+  rpl = Mall*U; rpl *= c0; rhs -= rpl;
+  rpl = Ktrue*U; rhs -= rpl;
+  rpl = BC11*dP11; rhs -= rpl; rpl = BC12*dP12; rhs -= rpl; rpl = BC21*dP21; rhs -= rpl; rpl = BC22*dP22; rhs -= rpl;
+  rpl = BCth*dPth; rhs -= rpl;
+  if (isA) { kwcStress(); rpl = Bg1*mxk; rhs -= rpl; rpl = Bg2*myk; rhs -= rpl; }
+  rhs = rhs .* mask;
+  return 0;
+}
+// ---- consistent element-mean tangent of slip (and GB spin) ----
+varf vR1([u1,u2,th],[q]) = int2d(Th)(dx(u1)*q);
+varf vR2([u1,u2,th],[q]) = int2d(Th)(dy(u2)*q);
+varf vR3([u1,u2,th],[q]) = int2d(Th)((dy(u1)+dx(u2))*q);
+varf vR4([u1,u2,th],[q]) = int2d(Th)((rotv(u1,u2) - th)*q);
+matrix Rk1 = vR1(Wh, Ph), Rk2 = vR2(Wh, Ph), Rk3 = vR3(Wh, Ph), Rk4 = vR4(Wh, Ph);
+matrix Rk = [[Rk1],[Rk2],[Rk3],[Rk4]];
+matrix RkT = Rk';
+real[int] cp1a(nt), cp2a(nt), cp3a(nt);
+cp1a = C11 .* P11a; tmp = C12 .* P22a; cp1a += tmp; tmp = C16 .* P12a; tmp *= 2; cp1a += tmp;
+cp2a = C12 .* P11a; tmp = C22 .* P22a; cp2a += tmp; tmp = C26 .* P12a; tmp *= 2; cp2a += tmp;
+cp3a = C16 .* P11a; tmp = C26 .* P22a; cp3a += tmp; tmp = C66 .* P12a; tmp *= 2; cp3a += tmp;
+real[int] cp1b(nt), cp2b(nt), cp3b(nt);
+cp1b = C11 .* P11b; tmp = C12 .* P22b; cp1b += tmp; tmp = C16 .* P12b; tmp *= 2; cp1b += tmp;
+cp2b = C12 .* P11b; tmp = C22 .* P22b; cp2b += tmp; tmp = C26 .* P12b; tmp *= 2; cp2b += tmp;
+cp3b = C16 .* P11b; tmp = C26 .* P22b; cp3b += tmp; tmp = C66 .* P12b; tmp *= 2; cp3b += tmp;
+real[int] cp1c(nt), cp2c(nt), cp3c(nt);
+cp1c = C11 .* P11c; tmp = C12 .* P22c; cp1c += tmp; tmp = C16 .* P12c; tmp *= 2; cp1c += tmp;
+cp2c = C12 .* P11c; tmp = C22 .* P22c; cp2c += tmp; tmp = C26 .* P12c; tmp *= 2; cp2c += tmp;
+cp3c = C16 .* P11c; tmp = C26 .* P22c; cp3c += tmp; tmp = C66 .* P12c; tmp *= 2; cp3c += tmp;
+real[int] Iv11(nt), Iv12(nt), Iv13(nt), Iv21(nt), Iv22(nt), Iv23(nt), Iv31(nt), Iv32(nt), Iv33(nt);
+real[int] N11(nt), N12(nt), N13(nt), N21(nt), N22(nt), N23(nt), N31(nt), N32(nt), N33(nt);
+real[int] W1a(nt), W1b(nt), W1c(nt), W2a(nt), W2b(nt), W2c(nt), W3a(nt), W3b(nt), W3c(nt), W4a(nt), W4b(nt), W4c(nt);
+real[int] Dm11(nt); real[int] Dm12(nt); real[int] Dm13(nt); real[int] Dm14(nt); real[int] Dm21(nt); real[int] Dm22(nt); real[int] Dm23(nt); real[int] Dm24(nt); real[int] Dm31(nt); real[int] Dm32(nt); real[int] Dm33(nt); real[int] Dm34(nt); real[int] Dm41(nt); real[int] Dm42(nt); real[int] Dm43(nt); real[int] Dm44(nt);
+real[int] q4(nt); q4 = -2*muc;
+func int plasticTangent() {
+  taus(); flow(ta, fs1, ga, dga); flow(tb, fs2, gb, dgb); flow(tcc, fs3, gc, dgc);
+  q4 = omb; q4 *= -2*muc;
+  m11 = dga .* Gx11; m11 *= dt; m11 += 1;   m12 = dga .* Gx12; m12 *= dt;   m13 = dga .* Gx13; m13 *= dt;
+  m21 = dgb .* Gx12; m21 *= dt;   m22 = dgb .* Gx22; m22 *= dt; m22 += 1;   m23 = dgb .* Gx23; m23 *= dt;
+  m31 = dgc .* Gx13; m31 *= dt;   m32 = dgc .* Gx23; m32 *= dt;   m33 = dgc .* Gx33; m33 *= dt; m33 += 1;
+  Iv11 = m22 .* m33; tmp = m23 .* m32; Iv11 -= tmp;
+  Iv21 = m23 .* m31; tmp = m21 .* m33; Iv21 -= tmp;
+  Iv31 = m21 .* m32; tmp = m22 .* m31; Iv31 -= tmp;
+  det = m11 .* Iv11; tmp = m12 .* Iv21; det += tmp; tmp = m13 .* Iv31; det += tmp;
+  Iv12 = m13 .* m32; tmp = m12 .* m33; Iv12 -= tmp;
+  Iv13 = m12 .* m23; tmp = m13 .* m22; Iv13 -= tmp;
+  Iv22 = m11 .* m33; tmp = m13 .* m31; Iv22 -= tmp;
+  Iv23 = m13 .* m21; tmp = m11 .* m23; Iv23 -= tmp;
+  Iv32 = m12 .* m31; tmp = m11 .* m32; Iv32 -= tmp;
+  Iv33 = m11 .* m22; tmp = m12 .* m21; Iv33 -= tmp;
+  N11 = Iv11 ./ det; tmp = dga; tmp *= dt; N11 = N11 .* tmp;
+  N12 = Iv12 ./ det; tmp = dgb; tmp *= dt; N12 = N12 .* tmp;
+  N13 = Iv13 ./ det; tmp = dgc; tmp *= dt; N13 = N13 .* tmp;
+  N21 = Iv21 ./ det; tmp = dga; tmp *= dt; N21 = N21 .* tmp;
+  N22 = Iv22 ./ det; tmp = dgb; tmp *= dt; N22 = N22 .* tmp;
+  N23 = Iv23 ./ det; tmp = dgc; tmp *= dt; N23 = N23 .* tmp;
+  N31 = Iv31 ./ det; tmp = dga; tmp *= dt; N31 = N31 .* tmp;
+  N32 = Iv32 ./ det; tmp = dgb; tmp *= dt; N32 = N32 .* tmp;
+  N33 = Iv33 ./ det; tmp = dgc; tmp *= dt; N33 = N33 .* tmp;
+  W1a = cp1a .* N11; tmp = cp1b .* N21; W1a += tmp; tmp = cp1c .* N31; W1a += tmp;
+  W1b = cp1a .* N12; tmp = cp1b .* N22; W1b += tmp; tmp = cp1c .* N32; W1b += tmp;
+  W1c = cp1a .* N13; tmp = cp1b .* N23; W1c += tmp; tmp = cp1c .* N33; W1c += tmp;
+  W2a = cp2a .* N11; tmp = cp2b .* N21; W2a += tmp; tmp = cp2c .* N31; W2a += tmp;
+  W2b = cp2a .* N12; tmp = cp2b .* N22; W2b += tmp; tmp = cp2c .* N32; W2b += tmp;
+  W2c = cp2a .* N13; tmp = cp2b .* N23; W2c += tmp; tmp = cp2c .* N33; W2c += tmp;
+  W3a = cp3a .* N11; tmp = cp3b .* N21; W3a += tmp; tmp = cp3c .* N31; W3a += tmp;
+  W3b = cp3a .* N12; tmp = cp3b .* N22; W3b += tmp; tmp = cp3c .* N32; W3b += tmp;
+  W3c = cp3a .* N13; tmp = cp3b .* N23; W3c += tmp; tmp = cp3c .* N33; W3c += tmp;
+  W4a = q4 .* N11; tmp = q4 .* N21; W4a += tmp; tmp = q4 .* N31; W4a += tmp;
+  W4b = q4 .* N12; tmp = q4 .* N22; W4b += tmp; tmp = q4 .* N32; W4b += tmp;
+  W4c = q4 .* N13; tmp = q4 .* N23; W4c += tmp; tmp = q4 .* N33; W4c += tmp;
+  Dm11 = W1a .* cp1a; tmp = W1b .* cp1b; Dm11 += tmp; tmp = W1c .* cp1c; Dm11 += tmp; Dm11 = Dm11 ./ areas;
+  Dm12 = W1a .* cp2a; tmp = W1b .* cp2b; Dm12 += tmp; tmp = W1c .* cp2c; Dm12 += tmp; Dm12 = Dm12 ./ areas;
+  Dm13 = W1a .* cp3a; tmp = W1b .* cp3b; Dm13 += tmp; tmp = W1c .* cp3c; Dm13 += tmp; Dm13 = Dm13 ./ areas;
+  Dm14 = W1a .* q4; tmp = W1b .* q4; Dm14 += tmp; tmp = W1c .* q4; Dm14 += tmp; Dm14 = Dm14 ./ areas;
+  Dm21 = W2a .* cp1a; tmp = W2b .* cp1b; Dm21 += tmp; tmp = W2c .* cp1c; Dm21 += tmp; Dm21 = Dm21 ./ areas;
+  Dm22 = W2a .* cp2a; tmp = W2b .* cp2b; Dm22 += tmp; tmp = W2c .* cp2c; Dm22 += tmp; Dm22 = Dm22 ./ areas;
+  Dm23 = W2a .* cp3a; tmp = W2b .* cp3b; Dm23 += tmp; tmp = W2c .* cp3c; Dm23 += tmp; Dm23 = Dm23 ./ areas;
+  Dm24 = W2a .* q4; tmp = W2b .* q4; Dm24 += tmp; tmp = W2c .* q4; Dm24 += tmp; Dm24 = Dm24 ./ areas;
+  Dm31 = W3a .* cp1a; tmp = W3b .* cp1b; Dm31 += tmp; tmp = W3c .* cp1c; Dm31 += tmp; Dm31 = Dm31 ./ areas;
+  Dm32 = W3a .* cp2a; tmp = W3b .* cp2b; Dm32 += tmp; tmp = W3c .* cp2c; Dm32 += tmp; Dm32 = Dm32 ./ areas;
+  Dm33 = W3a .* cp3a; tmp = W3b .* cp3b; Dm33 += tmp; tmp = W3c .* cp3c; Dm33 += tmp; Dm33 = Dm33 ./ areas;
+  Dm34 = W3a .* q4; tmp = W3b .* q4; Dm34 += tmp; tmp = W3c .* q4; Dm34 += tmp; Dm34 = Dm34 ./ areas;
+  Dm41 = W4a .* cp1a; tmp = W4b .* cp1b; Dm41 += tmp; tmp = W4c .* cp1c; Dm41 += tmp; Dm41 = Dm41 ./ areas;
+  Dm42 = W4a .* cp2a; tmp = W4b .* cp2b; Dm42 += tmp; tmp = W4c .* cp2c; Dm42 += tmp; Dm42 = Dm42 ./ areas;
+  Dm43 = W4a .* cp3a; tmp = W4b .* cp3b; Dm43 += tmp; tmp = W4c .* cp3c; Dm43 += tmp; Dm43 = Dm43 ./ areas;
+  Dm44 = W4a .* q4; tmp = W4b .* q4; Dm44 += tmp; tmp = W4c .* q4; Dm44 += tmp; Dm44 = Dm44 ./ areas;
+  if (isA) { tmp = betaS; tmp *= 4*muc; tmp = tmp ./ areas; Dm44 += tmp; }
+  matrix M11 = Dm11; matrix M12 = Dm12; matrix M13 = Dm13; matrix M14 = Dm14; matrix M21 = Dm21; matrix M22 = Dm22; matrix M23 = Dm23; matrix M24 = Dm24; matrix M31 = Dm31; matrix M32 = Dm32; matrix M33 = Dm33; matrix M34 = Dm34; matrix M41 = Dm41; matrix M42 = Dm42; matrix M43 = Dm43; matrix M44 = Dm44;
+  matrix Dmt = [[M11,M12,M13,M14],[M21,M22,M23,M24],[M31,M32,M33,M34],[M41,M42,M43,M44]];
+  matrix T1 = Dmt*Rk;
+  Kpl = RkT*T1;
+  return 0;
+}
+func int refreshTangent() {
+  if (isA) {
+    updatePhi2();
+    real[int] gx = gt0x + gt1; real[int] gy = gt0y + gt2;
+    real[int] nr = gx .* gx; tmp = gy .* gy; nr += tmp; nr += dlt*dlt; nr = sqrt(nr);
+    // consistent KWC tangent: f0*s*phi2/n*(I - g g/n^2) + f0*s*phi2*dlt^2/n^3 * g g/n^2 ... written as
+    // H = a I + c g(x)g,  a = f0(s gbar/n + e^2),  c = -f0 s gbar/n^3   (gbar = element mean of g(phi))
+    real[int] aH = gm ./ nr; aH *= sK; aH += eK*eK; aH *= f0;
+    real[int] n3 = nr .* nr; n3 = n3 .* nr; real[int] cc = gm ./ n3; cc *= -f0*sK;
+    tmp = gx .* gx; tmp = tmp .* cc; tmp += aH; H11[] = tmp;
+    tmp = gy .* gy; tmp = tmp .* cc; tmp += aH; H22[] = tmp;
+    tmp = gx .* gy; tmp = tmp .* cc; H12[] = tmp;
+  }
+  plasticTangent(); usePlTan = true;
+  buildA();
+  return 0;
+}
+real Wext = 0, Qtot = 0, Dcum = 0, E0 = 0;
+real Dneg = 0; int nneg = 0;
+
+func real elasticEnergy() {
+  u1[] = U;
+  real e = int2d(Th)( 0.5*dbl(dx(u1)-hp11, dy(u2)-hp22, 0.5*(dy(u1)+dx(u2))-hp12, dx(u1)-hp11, dy(u2)-hp22, 0.5*(dy(u1)+dx(u2))-hp12)
+                      + 2*muc*(rotv(u1,u2) - omp - th)^2
+                      + 0.5*curvK*((dx(th)-kq1)^2 + (dy(th)-kq2)^2) );
+  // element-mean finite-strain correction (arrays from the last taus() at this state)
+  tmp = psiF - psiL; tmp = tmp .* areas; e += tmp.sum;
+  if (isA) e += int2d(Th)( f0*(0.5*(1-phi)^2 + 0.5*aK^2*(dx(phi)^2+dy(phi)^2)
+                           + sK*gphi*(sqrt(gtx^2+gty^2+dlt^2) - dlt) + 0.5*eK^2*(gtx^2+gty^2)) );
+  return e;
+}
+func real storedEnergy() {
+  Ph rr; rr[] = rhoS;
+  real e = int2d(Th)(0.5*chi*mu*b*b*rr);
+  if (isA) e = int2d(Th)(0.5*chi*mu*b*b*phi*rr);
+  return e;
+}
+func real kinU() { real[int] w = Mu*V; return 0.5*(V'*w); }
+func real kinT() { real[int] w = Mt*V; return 0.5*(V'*w); }
+func real heat() { return int2d(Th)(rhoC*(T - T0)); }
+
+// ---------------- output -----------------------------------------------
+int nstart = 0;
+if (restart != "") { ifstream fck(restart); fck >> nstart; }
+ofstream log(out + "_log.csv", append);
+if (nstart == 0) log << "step,t_ns,load_GPa,iters,locres,KE_trans,KE_rot,E_elastic,E_stored,Q_heat,W_ext,D_cum,audit_residual,max_abs_slip,mean_abs_slip,max_dT,max_abs_dtheta_deg,mean_rhoS_um2,max_rhoG_um2,min_phi,neg_D_count" << endl;
+// ---------------- output: P1 only for fields whose gradients are used later, P0 for the rest ----------
+// P1 (point data): nodal solver fields that post-processing differentiates -- u, v, dtheta, theta_lattice, theta_dot, T, phi.
+// P0 (cell data): element history and element-derived quantities, written unaveraged (exact solver values, sharp at grain boundaries).
+// Only F's theta_lattice uses the P1-averaged grain angle (so its gradient includes the smeared initial boundaries).
+varf vP0P1([a], [w]) = int2d(Th)(a*w);
+matrix Bp01 = vP0P1(Ph, Vh1);
+real[int] lump(Vh1.ndof); { real[int] o0(nt); o0 = 1; lump = Bp01*o0; }
+func int toP1(real[int] & a0, real[int] & o1v) { o1v = Bp01*a0; o1v = o1v ./ lump; return 0; }
+real[int] cth0(nt), sth0(nt), gid(nt);
+for (int k = 0; k < nt; k++) { real tg = thg(Th[k].label - 1); cth0[k] = cos(tg); sth0[k] = sin(tg); gid[k] = Th[k].label; }
+string pvd = "";
+string outbase = out; { int kk = out.rfind("/"); if (kk >= 0) outbase = out(kk+1:out.length-1); }
+real t = 0;
+func int writeVTK(string tag) {
+  if (vtkon) {
+    // committed element state (called after the step is committed): zero increments
+    real[int] sva = dpa, svb = dpb, svc = dpc, svw = dwst;
+    dpa = 0; dpb = 0; dpc = 0; dwst = 0;
+    taus();
+    // Cauchy stress sigma = (dpsi/dF) F^T / J at the element-mean deformation (sigma_ij: i = force direction)
+    real[int] F11 = e11 + one, F22 = e22 + one;
+    real[int] Jd = F11 .* F22; tmp = hy1 .* hx2; Jd -= tmp;
+    real[int] q11 = PF11 .* F11; tmp = PF12 .* hy1; q11 += tmp; q11 = q11 ./ Jd;
+    real[int] sg12 = PF11 .* hx2; tmp = PF12 .* F22; sg12 += tmp; sg12 = sg12 ./ Jd;
+    real[int] sg21 = PF21 .* F11; tmp = PF22 .* hy1; sg21 += tmp; sg21 = sg21 ./ Jd;
+    real[int] q22 = PF21 .* hx2; tmp = PF22 .* F22; q22 += tmp; q22 = q22 ./ Jd;
+    // sigma_33 = S_33 / J with S_33 from the lattice-frame Green strain (Ubar_33 = 1)
+    real[int] c2 = cth0 .* cth0; real[int] s2 = sth0 .* sth0; real[int] cs = cth0 .* sth0;
+    real[int] exl = c2 .* Eb11; tmp = s2 .* Eb22; exl += tmp; tmp = cs .* Eb12; tmp *= 2; exl += tmp;
+    real[int] eyl = s2 .* Eb11; tmp = c2 .* Eb22; eyl += tmp; tmp = cs .* Eb12; tmp *= -2; eyl += tmp;
+    real[int] sg33 = exl; sg33 *= Clxz; tmp = eyl; tmp *= Clyz; sg33 += tmp; sg33 = sg33 ./ Jd;
+    // couple stress (referential)
+    real[int] mc1(nt), mc2(nt);
+    if (isA) { kwcStress(); mc1 = mxk; mc2 = myk; }
+    else { mc1 = gt1; mc1 -= kq1[]; mc1 *= Acurv; mc2 = gt2; mc2 -= kq2[]; mc2 *= Acurv; }
+    real[int] th0d(nt); for (int k = 0; k < nt; k++) th0d[k] = thg(Th[k].label - 1)*180/pi;
+    real[int] kpa = kp1, kpb = kp2;
+    // element fields, written as P0 cell data. Not written because they are exact functions of what is:
+    //   grain id = cell "Label" (triangles), theta0 = meta grain_theta0_rad[Label-1], slip_net = |p1|+|p2|+|p3|
+    Ph f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29;
+    f1[] = pa; f2[] = pb; f3[] = pc; f4[] = pathE; f5[] = pathP;
+    f6[] = rhoS; f7[] = rhoG; f8[] = kpa; f9[] = kpb; f10[] = wst; f11[] = tauc;
+    f12[] = ta; f13[] = tb; f14[] = tcc;
+    f15[] = q11; f16[] = q22; f17[] = sg12; f18[] = sg21; f19[] = sg33;
+    f20[] = mc1; f21[] = mc2; f22[] = Drate;
+    f23[] = fp11; f24[] = fp12; f25[] = fp21; f26[] = fp22; f27[] = aa; f28[] = Jd; f29[] = psiF;
+    dpa = sva; dpb = svb; dpc = svc; dwst = svw;
+    Wh [w1, w2, wth]; w1[] = V;                        // velocities (u_dot, theta_dot)
+    Vh1 thdeg = th*180/pi, thtot = (th0s + th)*180/pi, thdot = wth, vx = w1, vy = w2;
+    if (!isA) { Vh1 g0; toP1(th0d, g0[]); thtot = g0 + th*180/pi; }   // F: grain angle (P1-averaged) + rotation
+    int[int] ord(36); ord = 0; ord(0:6) = 1;           // order is per field: 7 P1 fields, then 29 P0 fields
+    savevtk(out + "_" + tag + ".vtu", Th, [u1, u2, 0], [vx, vy, 0], thdeg, thtot, thdot, T, phi,
+            f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19,
+            f20, f21, f22, f23, f24, f25, f26, f27, f28, f29,
+            dataname = "u v dtheta_deg theta_lattice_deg theta_dot T phi p1 p2 p3 slip_path_eff slip_path_phys rhoS rhoG kp_x kp_y wstar tau_c tau_1 tau_2 tau_3 sig_11 sig_22 sig_12 sig_21 sig_33 m_x m_y D_rate Fp_11 Fp_12 "
+    + "Fp_21 Fp_22 w_cosserat J psi_elastic",
+            order = ord, bin = true, floatsol = true, floatmesh = true);
+    // ParaView time-series collection
+    pvd = pvd + "    <DataSet timestep=\"" + t + "\" file=\"" + outbase + "_" + tag + ".vtu\"/>\n";
+    { ofstream f(out + ".pvd");
+      f << "<?xml version=\"1.0\"?>\n<VTKFile type=\"Collection\" version=\"0.1\">\n  <Collection>\n" << pvd << "  </Collection>\n</VTKFile>\n"; }
+  }
+  return 0;
+}
+// ---------------- time loop ---------------------------------------------
+Wh [o1, o2, oth];
+Ht = 0;
+strength();
+localUpdate();
+refreshTangent();
+
+int nsteps = lrint(tend/dt);
+if (!isA) E0 = kinU() + kinT() + elasticEnergy() + storedEnergy() + heat();
+int ntot = (isA ? nrelax : 0) + nsteps;
+real Tprev = 0;
+real clk0 = clock();
+real omg = 1; real[int] rprev(Wh.ndof), dr(Wh.ndof);
+real[int] tna(nt), tnb(nt), tnc(nt), nna(nt), nnb(nt), nnc(nt), wn(nt); tna = 0; tnb = 0; tnc = 0; nna = 0; nnb = 0; nnc = 0; wn = 0;
+real[int] pr(Wh.ndof), tv(Wh.ndof), rk(Wh.ndof), Anew(Wh.ndof), Dloc(nt), act(nt), drho(nt), Zst(nt), sa0(nt);
+cout << "variant " << variant << "  j=" << jz << " um^2  muc=" << muc << "  amp=" << amp << " GPa  dir=" << ldir
+     << "  dt=" << dt << "  steps=" << ntot << "  nt=" << nt << "  ndof=" << Wh.ndof << endl;
+func int saveCk(int n) {
+  string fn = out + "_ck.txt";
+  { ofstream f(fn);
+    f.precision(17);
+    f << n << endl << t << " " << Tload << " " << Wext << " " << Dcum << " " << E0 << " " << nneg << endl;
+    f << U << V << Acc << pa << pb << pc << rhoS << rhoG << kp1 << kp2 << wst << tna << tnb << tnc << nna << nnb << nnc << wn << T[] << phi[] << thR[] << pathE << pathP << fp11 << fp12 << fp21 << fp22;
+  }
+  return 0;
+}
+if (restart != "") {
+  ifstream f(restart);
+  int nn; f >> nn; f >> t >> Tload >> Wext >> Dcum >> E0 >> nneg;
+  f >> U >> V >> Acc >> pa >> pb >> pc >> rhoS >> rhoG >> kp1 >> kp2 >> wst >> tna >> tnb >> tnc >> nna >> nnb >> nnc >> wn >> T[] >> phi[] >> thR[] >> pathE >> pathP >> fp11 >> fp12 >> fp21 >> fp22;
+  u1[] = U;
+  cout << "restarted from " << restart << " at step " << nstart << " t=" << t << endl;
+  // keep the ParaView time series written before the restart
+  { ifstream fp(out + ".pvd"); string ln;
+    while (fp.good()) { getline(fp, ln); if (ln.find("<DataSet") >= 0) pvd = pvd + ln + "\n"; } }
+  strength(); localUpdate(); refreshTangent();
+}
+// ---- run metadata (JSON) for later re-derivation of quantities ----
+if (nstart == 0) {
+  ofstream f(out + "_meta.json");
+  f.precision(10);
+  f << "{\n";
+  f << " \"units\": {\"length\": \"um\", \"time\": \"ns\", \"stress\": \"GPa\", \"temperature\": \"K\", \"density\": \"1e3 kg/m3\", \"energy_per_thickness\": \"GPa um^2 = 1e-3 J/m\"},\n";
+  f << " \"variant\": \"" << variant << "\", \"mesh\": \"" << mfile << "\", \"j_um2\": " << jz << ", \"amp_GPa\": " << amp << ", \"load_dir\": \"" << ldir << "\",\n";
+  f << " \"tend_ns\": " << tend << ", \"dt_ns\": " << dt << ", \"nrelax\": " << (isA ? nrelax : 0) << ", \"pulse_ns\": [2, 3, 2],\n";
+  f << " \"mu_c\": " << muc << ", \"rho\": " << rho << ", \"C_lattice\": {\"xxxx\": " << Clxx << ", \"yyyy\": " << Clyy << ", \"xxyy\": " << Clxy << ", \"xyxy\": " << Clss << ", \"xxzz\": " << Clxz << ", \"yyzz\": " << Clyz << "},\n";
+  f << " \"lattice_frame\": \"x=[110], y=[001], z=[-110]\",\n";
+  f << " \"slip_systems_lattice\": [";
+  for (int a = 0; a < 3; a++) f << (a ? ", " : "") << "{\"s\": [" << slx[a] << ", " << sly[a] << "], \"n\": [" << -sly[a] << ", " << slx[a] << "], \"f\": " << fsa[a] << "}";
+  f << "],\n";
+  f << " \"grain_theta0_rad\": ["; for (int g = 0; g < 8; g++) f << (g ? ", " : "") << thg(g); f << "],\n";
+  f << " \"hardening\": {\"tau0\": " << tau0 << ", \"lambda_T\": " << lamT << ", \"mu\": " << mu << ", \"b_um\": " << b << ", \"rho0_um2\": " << rho0 << ", \"K\": " << Kkmt << ", \"d_um\": " << dkmt << ", \"chi\": " << chi << ", \"alpha_mu\": " << alphaMu << "},\n";
+  f << " \"rate\": {\"gdot0_per_ns\": " << g0 << ", \"m\": " << mexp << ", \"B0_GPa_ns\": " << B0 << "},\n";
+  f << " \"thermal\": {\"T0\": " << T0 << ", \"rhoC\": " << rhoC << ", \"k\": " << kth << "},\n";
+  f << " \"curvature_F\": {\"A\": " << Acurv << ", \"l_mode\": " << lmode << "},\n";
+  f << " \"kwc_A\": {\"f0\": " << f0 << ", \"a\": " << aK << ", \"s\": " << sK << ", \"eps\": " << eK << ", \"delta\": " << dlt << ", \"eta_phi0\": " << etaPhi0 << ", \"Q_phi\": " << Qphi << ", \"eta_star0\": " << etaStar0 << ", \"C_D\": " << CD
+    << ", \"g\": \"-2[phi + ln(1-phi)]\", \"h\": 1, \"f\": \"(1-phi)^2/2\", \"spin_friction\": \"eta_s = 2 eta_star0/(1-phi)^2\", \"phi_max\": " << phimax << "},\n";
+  f << " \"kinematics\": \"finite deformation: F = I + grad u = R(theta) Ubar Fp, Fp(0) = I in the grain-rotated reference lattice; SVK on Ebar = (Ubar^T Ubar - I)/2 + 2 mu_c a^2, a = (Ubar_21 - Ubar_12)/2; "
+    << "element-mean finite-strain correction on a pointwise quadratic P2 operator\",\n";
+  f << " \"fields_note\": \"Point data (P1, nodal): u, v, dtheta_deg, theta_lattice_deg, theta_dot, T, phi -- the fields differentiated in post-processing. ";
+  f << "Cell data (P0, one value per triangle, exact solver values at the element-mean deformation): p1-p3 (accumulated slip), slip paths, rhoS, rhoG, kp, wstar, tau_c, tau_1-3 (Mandel resolved shear stress M:s(x)n), ";
+  f << "Cauchy stress sig_ij = (P F^T/J)_ij with i the force direction, sig_33, referential couple stress m, D_rate, Fp_ij (plastic distortion, reference frame), w_cosserat = (Ubar_21-Ubar_12)/2, J = det F, "
+    << "psi_elastic (SVK + Cosserat energy density per reference area). ";
+  f << "Cells include the boundary edges (line cells); use triangle cells only. Grain id = cell Label of triangles. ";
+  f << "Derived in paraview_derived.py: theta0, slip_net, drag_eta, strain measures. ";
+  f << "For F, theta_lattice_deg uses the grain angle averaged to the nodes. ";
+  f << "Coordinates and u are referential (Lagrangian); use u to warp. ";
+  f << "theta_dot in rad/ns, D_rate in GPa/ns, rho in um^-2.\"\n";
+  f << "}\n";
+}
+if (nstart == 0 && !isA) writeVTK("t0");
+for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
+  bool relax = isA && (n <= nrelax);
+  if (!relax) t += dt;
+  Tprev = Tload;
+  Tload = relax ? 0. : amp*envelope(t/tscale);
+  real etaPhi = (relax ? etaPhiRelax : etaPhi0);
+  Un = U;
+  pr = U; pr *= c0; tv = V; tv *= c1; pr += tv; pr += Acc;
+  rin = Mu*pr; rk = Mt*pr; rin += rk;
+  dpa = 0; dpb = 0; dpc = 0; dva = 0; dvb = 0; dvc = 0; dwst = 0;
+  if (isA) updatePhi2();
+  if (isA && relax && n % atoi(arg("-rfr","4")) == 0) refreshTangent();
+  strength();
+  // predictor (average acceleration)
+  tv = V; tv *= dt; U += tv; tv = Acc; tv *= 0.25*dt*dt; U += tv;
+  u1[] = U;
+  int it; real du = 1;
+  real tl = 0, ta0 = 0, ts = 0;
+  for (it = 0; it < maxit; it++) {
+    real c0k = clock();
+    localUpdate();
+    tl += clock() - c0k; c0k = clock();
+    residual();
+    ta0 += clock() - c0k; c0k = clock();
+    tv = Aeff^-1*rhs;
+    ts += clock() - c0k;
+    // Aitken relaxation of the fixed-point (modified Newton) iteration
+    if (it == 0) { omg = 1; } else {
+      dr = tv; dr -= rprev; real dd = dr'*dr; if (dd > 0) omg = -omg*(rprev'*dr)/dd;
+      omg = max(0.2, min(omg, 8.));
+    }
+    rprev = tv;
+    tv *= omg;
+    U += tv;
+    u1[] = U;
+    du = tv.linfty/max(U.linfty, 1e-30);
+    if (verbose) cout << "   it " << it << " du " << du << " locits " << nlocit << " locres " << locres << " maxdp " << max(dpa.linfty, dpb.linfty, dpc.linfty) << endl;
+    if (du < tolU && it > 0) break;
+  }
+  if (verbose) cout << "step " << n << " t " << t << " iters " << it << " local " << tl << " s, assemble " << ta0 << " s, solve " << ts << " s" << endl;
+  localUpdate();
+  if (!relax && n % nref == 0) refreshTangent();   // tangent from the converged state of this step
+  // Newmark update
+  Anew = U; Anew -= Un; Anew *= c0; tv = V; tv *= c1; Anew -= tv; Anew -= Acc;
+  tv = Acc; tv += Anew; tv *= 0.5*dt; V += tv; Acc = Anew;
+  // external work (trapezoidal in load)
+  o1[] = Un;
+  Wext += 0.5*(Tprev + Tload)*int1d(Th, 3)(dxl*(u1 - o1) + dyl*(u2 - oth*0 - o2));
+  // dissipation and commit
+  // dissipation with midpoint driving forces: consistent with the trapezoidal energy identity
+  taus();
+  tmp = ta + tna; tmp *= 0.5; Dloc = tmp .* dpa; tna = ta;
+  tmp = tb + tnb; tmp *= 0.5; tmp = tmp .* dpb; Dloc += tmp; tnb = tb;
+  tmp = tcc + tnc; tmp *= 0.5; tmp = tmp .* dpc; Dloc += tmp; tnc = tcc;
+  tmp = tstar .* dwst; Dloc += tmp; wn = wloc;   // implicit spin: tau*_{n+1} dw* = eta_s dw*^2/dt >= 0
+  if (!isA) { nus();
+    tmp = nua + nna; tmp *= 0.5; tmp = tmp .* dva; Dloc += tmp; nna = nua;
+    tmp = nub + nnb; tmp *= 0.5; tmp = tmp .* dvb; Dloc += tmp; nnb = nub;
+    tmp = nuc + nnc; tmp *= 0.5; tmp = tmp .* dvc; Dloc += tmp; nnc = nuc; }
+  act = abs(dpa); act *= fs1; tmp = abs(dpb); tmp *= fs2; act += tmp; tmp = abs(dpc); tmp *= fs3; act += tmp;
+  tmp = rhoS; drho = sqrt(tmp); drho *= Kkmt; tmp = rhoS; tmp *= 2*dkmt; drho -= tmp; drho *= 1./b; drho = drho .* act;
+  if (isA) {
+    // phase field: backward Euler, Newton on the log coupling g'(phi) = 2 phi/(1-phi), g'' = 2/(1-phi)^2
+    phin = phi;
+    Ph Nd = sqrt(gtx^2 + gty^2 + dlt^2) - dlt, rr; rr[] = rhoS;
+    Vh1 phik = phi;
+    for (int kn = 0; kn < 8; kn++) {
+      solve phieq(phi, xi) = int2d(Th)((etaPhi*exp(Qphi/Rgas*(1./T - 1./T0))/dt + f0 + f0*sK*Nd*2/(1-phik)^2)*phi*xi
+                                      + f0*aK^2*(dx(phi)*dx(xi) + dy(phi)*dy(xi)))
+                        - int2d(Th)(etaPhi*exp(Qphi/Rgas*(1./T - 1./T0))/dt*phin*xi + (f0 - 0.5*chi*mu*b*b*rr)*xi
+                                    - f0*sK*Nd*(2*phik/(1-phik) - 2*phik/(1-phik)^2)*xi);
+      for [i, pv : phi[]] pv = max(0., min(phimax, pv));
+      real[int] ddp = phi[]; ddp -= phik[]; real dmx = ddp.linfty;
+      phik = phi;
+      if (dmx < 1e-10) break;
+    }
+    Ph dph = phi - phin, ph2 = phi, eph = etaPhi*exp(Qphi/Rgas*(1./T - 1./T0));
+    tmp = abs(dph[]); tmp *= CD; tmp = tmp .* rhoS; drho -= tmp;
+    tmp = dph[] .* dph[]; tmp = tmp .* eph[]; tmp *= 1./dt; Dloc += tmp;
+    Zst = ph2[]; Zst *= 0.5*chi*mu*b*b;
+  } else { Zst = 0.5*chi*mu*b*b; }
+  tmp = Zst .* drho; Dloc -= tmp;
+  for [i, dv : Dloc] if (dv < -1e-14) { nneg++; }
+  pa += dpa; pb += dpb; pc += dpc; wst += dwst; rhoS += drho;
+  fp11 = tf11; fp12 = tf12; fp21 = tf21; fp22 = tf22;
+  tmp = abs(dpa); pathE += tmp; tmp = abs(dpb); pathE += tmp; tmp = abs(dpc); pathE += tmp; pathP += act;
+  for [i, rv : rhoS] rv = max(rv, 1e-3);
+  if (!isA) {
+    kp1 = kq1[]; kp2 = kq2[];
+    tmp = kp1 .* kp1; tmp2 = kp2 .* kp2; tmp += tmp2; rhoG = sqrt(tmp); rhoG *= 1./b;
+  } else {
+    // GND from deformation-induced lattice curvature, weighted by g(phi) = phi^2 so that the
+    // boundary-core curvature (carried by the KWC energy) is not counted as dislocation density
+    GT1 = dx(th) - dx(thR); GT2 = dy(th) - dy(thR); tmp = GT1[] .* GT1[]; tmp2 = GT2[] .* GT2[]; tmp += tmp2; rhoG = sqrt(tmp); rhoG = rhoG .* ph2m; rhoG *= 1./b;
+  }
+  Dsrc[] = Dloc; Drate = Dloc; Drate *= 1./dt;
+  Dcum += int2d(Th)(Dsrc);
+  // heat
+  Tn = T;
+  real[int] rT = vTr(0, Vh1);
+  T[] = ATh^-1*rT;
+  if (isA && n == nrelax) {
+    { string sv = out; saveCk(n); exec("cp " + out + "_ck.txt " + out + "_relaxed_ck.txt"); }
+    V = 0; Acc = 0; Wext = 0; Dcum = 0; nneg = 0; T = T0; Tn = T0;   // interface relaxation heat is an initialization artefact
+    rhoS = rho0;   // sweeping recovery during the zero-load relaxation is also an initialization artefact
+    thR = th; rhoG = 0;   // GND counts lattice curvature produced after relaxation only
+    E0 = kinU() + kinT() + elasticEnergy() + storedEnergy() + heat();
+    cout << "relaxation done: E0=" << E0 << " min phi=" << phi[].min << endl;
+    writeVTK("relaxed");
+  }
+  if (!relax || n == nrelax) {
+    real KEu = kinU(), KEt = kinT(), Ee = elasticEnergy(), Es = storedEnergy(), Q = heat();
+    real res = Wext - (KEu + KEt + Ee + Es + Q - E0);
+    real[int] sl = abs(pa); tmp = abs(pb); sl += tmp; tmp = abs(pc); sl += tmp;
+    Ph slp; slp[] = sl;
+    real meanslip = int2d(Th)(slp)/100.;
+    Ph rs; rs[] = rhoS; real meanrho = int2d(Th)(rs)/100.;
+    log << n << "," << t << "," << Tload << "," << it << "," << locres << "," << KEu << "," << KEt << "," << Ee << "," << Es << ","
+        << Q << "," << Wext << "," << Dcum << "," << res << "," << sl.max << "," << meanslip << "," << (T[].max - T0) << ","
+        << (max(th[].max, -th[].min)*180/pi) << "," << meanrho << "," << rhoG.max << "," << phi[].min << "," << nneg << endl;
+    log.flush;
+    if (n % 50 == 0) cout << "step " << n << " t=" << t << " it=" << it << " KE=" << KEu << " Wext=" << Wext << " res=" << res
+                          << " maxslip=" << sl.max << " dTmax=" << (T[].max - T0) << "  wall=" << (clock() - clk0) << " s" << endl;
+  }
+  real tt = t + 1e-9;
+  if (!relax && (abs(t - 2) < dt/2 || abs(t - 5) < dt/2 || abs(t - 7) < dt/2 || abs(t - 10) < dt/2 || abs(t - tend) < dt/2))
+    writeVTK("t" + lrint(t*100));
+  if (!relax && vtkevery > 0) { if ((n - (isA ? nrelax : 0)) % vtkevery == 0) writeVTK("s" + (n - (isA ? nrelax : 0))); }   // (no short-circuit &&)
+  if (n % ckevery == 0 || n == ntot) saveCk(n);
+  if (clock() - clk0 > walllimit) { saveCk(n); cout << "wall limit reached at step " << n << "; checkpoint written" << endl; break; }
+}
+cout << "done. wall time " << (clock() - clk0) << " s" << endl;
+if (atoi(arg("-check", "0"))) {
+  // (1) tau_a = -(1/A_e) dE/dgamma_a and tau* = -(1/A_e) dE/dw* at the most stressed element (finite differences)
+  localUpdate(); taus(); setHp();
+  real[int] q = abs(ta); int k = q.imax; real ar = Th[k].area;
+  for (int sys = 0; sys < 4; sys++) {
+    real h = 1e-7;
+    real[int] sva = dpa, svb = dpb, svc = dpc, svw = dwst;
+    if (sys == 0) dpa[k] += h; if (sys == 1) dpb[k] += h; if (sys == 2) dpc[k] += h; if (sys == 3) dwst[k] += h;
+    taus(); setHp(); real Ep = elasticEnergy();
+    dpa = sva; dpb = svb; dpc = svc; dwst = svw;
+    if (sys == 0) dpa[k] -= h; if (sys == 1) dpb[k] -= h; if (sys == 2) dpc[k] -= h; if (sys == 3) dwst[k] -= h;
+    taus(); setHp(); real Em = elasticEnergy();
+    dpa = sva; dpb = svb; dpc = svc; dwst = svw;
+    taus(); setHp();
+    real tt = (sys == 0) ? ta[k] : ((sys == 1) ? tb[k] : ((sys == 2) ? tcc[k] : tstar[k]));
+    cout << "FD check " << (sys < 3 ? "slip " + sys : "spin  ") << ": -dE/dp/area = " << -(Ep - Em)/(2*h)/ar << "  driving force = " << tt << endl;
+  }
+  // (2) internal force = dE/dU along a direction (checks the element-mean finite-strain correction assembly)
+  real[int] dirv(Wh.ndof); for (int i = 0; i < Wh.ndof; i++) dirv[i] = sin(0.37*i + 1.3)*1e-3; dirv = dirv .* mask;
+  kin(); taus(); setHp();
+  real[int] fint = Ktrue*U;
+  rpl = BC11*dP11; fint += rpl; rpl = BC12*dP12; fint += rpl; rpl = BC21*dP21; fint += rpl; rpl = BC22*dP22; fint += rpl; rpl = BCth*dPth; fint += rpl;
+  rpl = B1*hp11[]; fint -= rpl; rpl = B2*hp22[]; fint -= rpl; rpl = B3*hp12[]; fint -= rpl; rpl = Bw*omp[]; fint -= rpl;
+  if (!isA) { rpl = Bk1*kq1[]; fint -= rpl; rpl = Bk2*kq2[]; fint -= rpl; }
+  if (isA) { kwcStress(); rpl = Bg1*mxk; fint += rpl; rpl = Bg2*myk; fint += rpl; }
+  real hU = 1e-4; real[int] U0 = U, dU = dirv; dU *= hU;
+  U = U0; U += dU; u1[] = U; kin(); taus(); real Ep = elasticEnergy();
+  U = U0; U -= dU; u1[] = U; kin(); taus(); real Em = elasticEnergy();
+  U = U0; u1[] = U; kin(); taus();
+  cout << "FD check internal force: dE/dU.d = " << (Ep - Em)/(2*hU) << "   f_int.d = " << (fint'*dirv) << endl;
+}
