@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<VTKFile type="Collection" version="0.1">
+  <Collection>
+    <DataSet timestep="0.1" file="pist_up250ms_s10.vtu"/>
+    <DataSet timestep="0.2" file="pist_up250ms_s20.vtu"/>
+    <DataSet timestep="0.3" file="pist_up250ms_s30.vtu"/>
+    <DataSet timestep="0.4" file="pist_up250ms_s40.vtu"/>
+    <DataSet timestep="0.5" file="pist_up250ms_s50.vtu"/>
+    <DataSet timestep="0.6" file="pist_up250ms_s60.vtu"/>
+    <DataSet timestep="0.7" file="pist_up250ms_s70.vtu"/>
+    <DataSet timestep="0.8" file="pist_up250ms_s80.vtu"/>
+    <DataSet timestep="0.9" file="pist_up250ms_s90.vtu"/>
+    <DataSet timestep="1" file="pist_up250ms_s100.vtu"/>
+    <DataSet timestep="1.1" file="pist_up250ms_s110.vtu"/>
+    <DataSet timestep="1.2" file="pist_up250ms_s120.vtu"/>
+  </Collection>
+</VTKFile>

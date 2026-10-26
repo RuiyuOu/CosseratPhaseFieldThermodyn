@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<VTKFile type="Collection" version="0.1">
+  <Collection>
+    <DataSet timestep="0.1" file="pist_up100ms_s10.vtu"/>
+    <DataSet timestep="0.2" file="pist_up100ms_s20.vtu"/>
+  </Collection>
+</VTKFile>

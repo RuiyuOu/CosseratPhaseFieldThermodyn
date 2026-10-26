@@ -18,5 +18,11 @@
     <DataSet timestep="0.75" file="lad_P10000MPa_S1000MPa_s75.vtu"/>
     <DataSet timestep="0.8" file="lad_P10000MPa_S1000MPa_s80.vtu"/>
     <DataSet timestep="0.85" file="lad_P10000MPa_S1000MPa_s85.vtu"/>
+    <DataSet timestep="0.9" file="lad_P10000MPa_S1000MPa_s90.vtu"/>
+    <DataSet timestep="0.95" file="lad_P10000MPa_S1000MPa_s95.vtu"/>
+    <DataSet timestep="1" file="lad_P10000MPa_S1000MPa_s100.vtu"/>
+    <DataSet timestep="1.05" file="lad_P10000MPa_S1000MPa_s105.vtu"/>
+    <DataSet timestep="1.1" file="lad_P10000MPa_S1000MPa_s110.vtu"/>
+    <DataSet timestep="1.15" file="lad_P10000MPa_S1000MPa_s115.vtu"/>
   </Collection>
 </VTKFile>

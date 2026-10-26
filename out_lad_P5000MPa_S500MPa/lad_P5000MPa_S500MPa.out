@@ -1,0 +1,14 @@
+variant A  j=0.01 um^2  muc=75.4  amp=5 GPa  dir=combo  dt=0.01  steps=1100  nt=58391  ndof=263775
+restarted from out_lad_P5000MPa_S500MPa/lad_P5000MPa_S500MPa_ck.txt at step 100 t=0
+step 150 t=0.5 it=16 KE=0.00282349 Wext=0.00553129 res=-0.204359 maxslip=0.00824202 dTmax=1.61866  wall=2184.08 s
+step 200 t=1 it=13 KE=0.179031 Wext=0.339788 res=-0.204374 maxslip=0.0879058 dTmax=9.34477  wall=4342.6 s
+step 250 t=1.5 it=15 KE=1.65069 Wext=2.7415 res=-0.204194 maxslip=3.58119 dTmax=343.917  wall=6472.44 s
+step 300 t=2 it=35 KE=6.80908 Wext=9.49957 res=-0.963761 maxslip=7.26683 dTmax=1873.81  wall=10684.1 s
+nan != nan diff nan => Sorry error in Optimization (e) add:  int2d(Th,optimize=0)(...)
+ remark if you add  (..  ,   optimize=2) then  you remove this check (be careful); 
+  current line = 926
+Exec error : In Optimized version 
+   -- number :1
+Exec error : In Optimized version 
+   -- number :1
+ err code 8 ,  mpirank 0

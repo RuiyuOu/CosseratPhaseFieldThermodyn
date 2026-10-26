@@ -55,5 +55,9 @@
     <DataSet timestep="2.55" file="lad_P2000MPa_S200MPa_s255.vtu"/>
     <DataSet timestep="2.6" file="lad_P2000MPa_S200MPa_s260.vtu"/>
     <DataSet timestep="2.65" file="lad_P2000MPa_S200MPa_s265.vtu"/>
+    <DataSet timestep="2.7" file="lad_P2000MPa_S200MPa_s270.vtu"/>
+    <DataSet timestep="2.75" file="lad_P2000MPa_S200MPa_s275.vtu"/>
+    <DataSet timestep="2.8" file="lad_P2000MPa_S200MPa_s280.vtu"/>
+    <DataSet timestep="2.85" file="lad_P2000MPa_S200MPa_s285.vtu"/>
   </Collection>
 </VTKFile>
