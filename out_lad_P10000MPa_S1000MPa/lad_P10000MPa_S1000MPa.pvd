@@ -26,5 +26,6 @@
     <DataSet timestep="1.15" file="lad_P10000MPa_S1000MPa_s115.vtu"/>
     <DataSet timestep="1.2" file="lad_P10000MPa_S1000MPa_s120.vtu"/>
     <DataSet timestep="1.25" file="lad_P10000MPa_S1000MPa_s125.vtu"/>
+    <DataSet timestep="1.3" file="lad_P10000MPa_S1000MPa_s130.vtu"/>
   </Collection>
 </VTKFile>

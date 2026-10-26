@@ -1,0 +1,12 @@
+variant A  j=0.01 um^2  muc=75.4  amp=10 GPa  dir=combo  dt=0.01  steps=1100  nt=58391  ndof=263775
+restarted from out_lad_P10000MPa_S1000MPa/lad_P10000MPa_S1000MPa_ck.txt at step 100 t=0
+step 150 t=0.5 it=14 KE=0.0112848 Wext=0.022263 res=-0.204359 maxslip=0.00935682 dTmax=1.61866  wall=7487.23 s
+step 200 t=1 it=20 KE=0.781409 Wext=1.43784 res=-0.204281 maxslip=0.892574 dTmax=116.759  wall=14840.5 s
+nan != nan diff nan => Sorry error in Optimization (e) add:  int2d(Th,optimize=0)(...)
+ remark if you add  (..  ,   optimize=2) then  you remove this check (be careful); 
+  current line = 926
+Exec error : In Optimized version 
+   -- number :1
+Exec error : In Optimized version 
+   -- number :1
+ err code 8 ,  mpirank 0

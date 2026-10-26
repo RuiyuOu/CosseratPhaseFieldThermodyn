@@ -4,5 +4,10 @@
     <DataSet timestep="0.1" file="pist_up100ms_s10.vtu"/>
     <DataSet timestep="0.2" file="pist_up100ms_s20.vtu"/>
     <DataSet timestep="0.3" file="pist_up100ms_s30.vtu"/>
+    <DataSet timestep="0.4" file="pist_up100ms_s40.vtu"/>
+    <DataSet timestep="0.5" file="pist_up100ms_s50.vtu"/>
+    <DataSet timestep="0.6" file="pist_up100ms_s60.vtu"/>
+    <DataSet timestep="0.7" file="pist_up100ms_s70.vtu"/>
+    <DataSet timestep="0.8" file="pist_up100ms_s80.vtu"/>
   </Collection>
 </VTKFile>
