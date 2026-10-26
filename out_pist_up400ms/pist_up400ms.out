@@ -1,0 +1,10 @@
+variant A  j=0.01 um^2  muc=75.4  amp=1 GPa  dir=piston  dt=0.01  steps=3100  nt=58391  ndof=263775
+restarted from out_pist_up400ms/pist_up400ms_ck.txt at step 100 t=0
+step 150 t=0.5 it=16 KE=5.58255 Wext=0 res=-11.8255 maxslip=0.352451 dTmax=40.378  wall=1790.46 s
+step 200 t=1 it=18 KE=19.4295 Wext=0 res=-40.8805 maxslip=0.665836 dTmax=38.9272  wall=3518.89 s
+step 250 t=1.5 it=16 KE=33.3071 Wext=0 res=-69.9093 maxslip=0.665836 dTmax=37.7603  wall=5312.44 s
+step 300 t=2 it=17 KE=47.3197 Wext=0 res=-98.9376 maxslip=0.667787 dTmax=36.6218  wall=7187.42 s
+step 350 t=2.5 it=22 KE=60.3369 Wext=0 res=-127.965 maxslip=0.667789 dTmax=35.6017  wall=9066.13 s
+step 400 t=3 it=27 KE=50.4139 Wext=0 res=-139.325 maxslip=0.665686 dTmax=52.6168  wall=11755.2 s
+TSTOP at step 442 t=3.42 max T=1517.62
+done. wall time 14934.3 s

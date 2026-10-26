@@ -29,5 +29,13 @@
     <DataSet timestep="2.5" file="pist_up400ms_s250.vtu"/>
     <DataSet timestep="2.6" file="pist_up400ms_s260.vtu"/>
     <DataSet timestep="2.7" file="pist_up400ms_s270.vtu"/>
+    <DataSet timestep="2.8" file="pist_up400ms_s280.vtu"/>
+    <DataSet timestep="2.9" file="pist_up400ms_s290.vtu"/>
+    <DataSet timestep="3" file="pist_up400ms_s300.vtu"/>
+    <DataSet timestep="3.1" file="pist_up400ms_s310.vtu"/>
+    <DataSet timestep="3.2" file="pist_up400ms_s320.vtu"/>
+    <DataSet timestep="3.3" file="pist_up400ms_s330.vtu"/>
+    <DataSet timestep="3.4" file="pist_up400ms_s340.vtu"/>
+    <DataSet timestep="3.42" file="pist_up400ms_tstop442.vtu"/>
   </Collection>
 </VTKFile>
