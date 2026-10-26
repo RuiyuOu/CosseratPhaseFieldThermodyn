@@ -33,5 +33,14 @@
     <DataSet timestep="1.5" file="lad_P5000MPa_S500MPa_s150.vtu"/>
     <DataSet timestep="1.55" file="lad_P5000MPa_S500MPa_s155.vtu"/>
     <DataSet timestep="1.6" file="lad_P5000MPa_S500MPa_s160.vtu"/>
+    <DataSet timestep="1.65" file="lad_P5000MPa_S500MPa_s165.vtu"/>
+    <DataSet timestep="1.7" file="lad_P5000MPa_S500MPa_s170.vtu"/>
+    <DataSet timestep="1.75" file="lad_P5000MPa_S500MPa_s175.vtu"/>
+    <DataSet timestep="1.8" file="lad_P5000MPa_S500MPa_s180.vtu"/>
+    <DataSet timestep="1.85" file="lad_P5000MPa_S500MPa_s185.vtu"/>
+    <DataSet timestep="1.9" file="lad_P5000MPa_S500MPa_s190.vtu"/>
+    <DataSet timestep="1.95" file="lad_P5000MPa_S500MPa_s195.vtu"/>
+    <DataSet timestep="2" file="lad_P5000MPa_S500MPa_t200.vtu"/>
+    <DataSet timestep="2" file="lad_P5000MPa_S500MPa_s200.vtu"/>
   </Collection>
 </VTKFile>
