@@ -72,5 +72,7 @@
     <DataSet timestep="3.4" file="lad_P1000MPa_S100MPa_s340.vtu"/>
     <DataSet timestep="3.45" file="lad_P1000MPa_S100MPa_s345.vtu"/>
     <DataSet timestep="3.5" file="lad_P1000MPa_S100MPa_s350.vtu"/>
+    <DataSet timestep="3.55" file="lad_P1000MPa_S100MPa_s355.vtu"/>
+    <DataSet timestep="3.6" file="lad_P1000MPa_S100MPa_s360.vtu"/>
   </Collection>
 </VTKFile>

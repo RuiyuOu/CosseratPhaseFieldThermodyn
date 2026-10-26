@@ -27,9 +27,12 @@ func string arg(string key, string def) {
 string variant = arg("-variant", "F");
 real jz      = atof(arg("-j", "1e-2"));      // um^2   (1e-14 m^2 = 1e-2 um^2)
 real amp     = atof(arg("-amp", "0.06"));    // GPa nominal traction
-string ldir  = arg("-dir", "shear");         // shear | comp | combo
+string ldir  = arg("-dir", "shear");         // shear | comp | combo | piston (confined piston: wall u_x=0 left, u_y=0 top/bottom, right edge u_x=-d(t))
 real ampS    = atof(arg("-shear", "0"));    // combo: additional shear traction (GPa, +y) on the loaded edge, with compression -amp in x
 real tend    = atof(arg("-tend", "15"));     // ns
+real pistUp  = atof(arg("-pistonup", "0.25"));   // piston: particle velocity u_p in um/ns (= 1000 m/s)
+real pistTr  = atof(arg("-ptr", "0.5"));         // piston: ramp time (ns), smooth quintic up and down
+real pistTh  = atof(arg("-pth", "2.0"));         // piston: hold time at u_p (ns); total piston travel = u_p (tr + th)
 real dt      = atof(arg("-dt", "0.01"));     // ns
 real muc     = atof(arg("-muc", "75.4"));    // GPa
 string out   = arg("-out", "run_" + variant);
@@ -42,6 +45,7 @@ real tolU    = atof(arg("-tol", "1e-7"));
 int stepsmax = atoi(arg("-stepsmax", "100000000"));
 real tscale  = atof(arg("-tscale", "1"));
 string restart = arg("-restart", "");       // checkpoint file to resume from
+real tstop = atof(arg("-tstop", "1e30"));   // K: stop gracefully (frame + checkpoint + _TSTOP.txt) when max T exceeds this (e.g. 1400 K ~ Cu melting) or T is NaN
 real walllimit = atof(arg("-walllimit", "1e30"));   // s: checkpoint and stop after this wall time
 int ckevery  = atoi(arg("-ckevery", "100"));     // debug: compress the load envelope in time
 bool isA = (variant == "A");
@@ -197,7 +201,10 @@ varf vKa([u1,u2,th],[v1,v2,ze]) =
            + H11*dx(th)*dx(ze) + H12*(dx(th)*dy(ze) + dy(th)*dx(ze)) + H22*dy(th)*dy(ze) );
 varf vMu([u1,u2,th],[v1,v2,ze]) = int2d(Th)(rho*(u1*v1 + u2*v2));
 varf vMt([u1,u2,th],[v1,v2,ze]) = int2d(Th)(rho*jz*th*ze);
-varf vBC([u1,u2,th],[v1,v2,ze]) = on(1, u1 = 0, u2 = 0);
+bool isP = (ldir == "piston");
+int LBa = 1, LBb = 1, LBc = 9999, LBd = 9999, LBe = 9999;      // label that constrains: left u1, left u2, bottom u2, top u2, right u1
+if (isP) { LBb = 9999; LBc = 2; LBd = 4; LBe = 3; }
+varf vBC([u1,u2,th],[v1,v2,ze]) = on(LBa, u1 = 0) + on(LBb, u2 = 0) + on(LBc, u2 = 0) + on(LBd, u2 = 0) + on(LBe, u1 = 0);
 
 real c0 = 4./(dt*dt), c1 = 4./dt;
 matrix Mu = vMu(Wh, Wh), Mt = vMt(Wh, Wh);
@@ -241,7 +248,7 @@ macro gphi() (-2*(phi + log(1 - phi))) //   (phi is clamped to [0, phimax] at th
 macro mKfac() (f0*(sK*gphi/sqrt(gtx^2+gty^2+dlt^2) + eK^2)) //
 varf vKWC([a1,a2,a3],[v1,v2,ze]) =
   int2d(Th)( -(mKfac*gtx - Ht*dx(th))*dx(ze) - (mKfac*gty - Ht*dy(th))*dy(ze) );
-varf vBCr([u1,u2,th],[v1,v2,ze]) = on(1, u1 = 0, u2 = 0);
+varf vBCr([u1,u2,th],[v1,v2,ze]) = on(1, u1 = 0, u2 = 0);   // (unused)
 
 // precomputed operators: plastic P0 fields -> RHS, unit traction -> RHS
 macro F1() dx(v1) //
@@ -559,7 +566,21 @@ func int plasticRHS() {
   if (!isA) { rpl = Bk1*kq1[]; rhs += rpl; rpl = Bk2*kq2[]; rhs += rpl; }
   return 0;
 }
-varf vBCm([u1,u2,th],[v1,v2,ze]) = on(1, u1 = 1, u2 = 1);
+varf vBCm([u1,u2,th],[v1,v2,ze]) = on(LBa, u1 = 1) + on(LBb, u2 = 1) + on(LBc, u2 = 1) + on(LBd, u2 = 1) + on(LBe, u1 = 1);
+varf vBCpist([u1,u2,th],[v1,v2,ze]) = on(LBe, u1 = 1);          // dofs of the piston edge (right, u_x); LBe=9999 unless piston mode
+real[int] pistm = vBCpist(0, Wh, tgv = 1);
+real[int] pistk(Wh.ndof); pistk = 1; pistk -= pistm;
+varf vBCconf([u1,u2,th],[v1,v2,ze]) = on(LBc, u2 = 1) + on(LBd, u2 = 1);   // roller dofs (u_y on top and bottom): must be exactly 0, not frozen at the relaxed-state value
+real[int] confm = vBCconf(0, Wh, tgv = 1);
+real[int] confk(Wh.ndof); confk = 1; confk -= confm;
+func real pistonDisp(real tt) {   // piston travel d(t) (um): integral of u_p e(t), e = quintic ramp up, hold, ramp down
+  real s, r = 0;
+  if (tt <= 0) return 0.;
+  if (tt < pistTr) { s = tt/pistTr; return pistUp*pistTr*(s^6 - 3*s^5 + 2.5*s^4); }
+  if (tt < pistTr + pistTh) return pistUp*(0.5*pistTr + (tt - pistTr));
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return pistUp*(0.5*pistTr + pistTh + pistTr*(s - (s^6 - 3*s^5 + 2.5*s^4))); }
+  return pistUp*(pistTr + pistTh);
+}
 real[int] bcm = vBCm(0, Wh, tgv = 1);
 real[int] mask(Wh.ndof); mask = 1; mask -= bcm;
 // KWC couple stress from element-mean phi^2 (consistent with the energy)
@@ -857,7 +878,7 @@ for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
   bool relax = isA && (n <= nrelax);
   if (!relax) t += dt;
   Tprev = Tload;
-  Tload = relax ? 0. : amp*envelope(t/tscale);
+  Tload = (relax || isP) ? 0. : amp*envelope(t/tscale);
   real etaPhi = (relax ? etaPhiRelax : etaPhi0);
   Un = U;
   pr = U; pr *= c0; tv = V; tv *= c1; pr += tv; pr += Acc;
@@ -868,6 +889,7 @@ for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
   strength();
   // predictor (average acceleration)
   tv = V; tv *= dt; U += tv; tv = Acc; tv *= 0.25*dt*dt; U += tv;
+  if (isP && !relax) { U = U .* pistk; U = U .* confk; tv = pistm; tv *= -pistonDisp(t); U += tv; }   // prescribed piston displacement (x) on the right edge
   u1[] = U;
   int it; real du = 1;
   real tl = 0, ta0 = 0, ts = 0;
@@ -982,6 +1004,10 @@ for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
     writeVTK("t" + lrint(t*100));
   if (!relax && vtkevery > 0) { if ((n - (isA ? nrelax : 0)) % vtkevery == 0) writeVTK("s" + (n - (isA ? nrelax : 0))); }   // (no short-circuit &&)
   if (n % ckevery == 0 || n == ntot) saveCk(n);
+  if (!relax && (!(T[].max < tstop) || !(T[].max > 0))) {
+    writeVTK("tstop" + n); saveCk(n);
+    { ofstream ft(out + "_TSTOP.txt"); ft << "stopped at step " << n << " t=" << t << " ns: max T = " << T[].max << " K exceeded tstop = " << tstop << " K (or NaN)" << endl; }
+    cout << "TSTOP at step " << n << " t=" << t << " max T=" << T[].max << endl; break; }
   if (clock() - clk0 > walllimit) { saveCk(n); cout << "wall limit reached at step " << n << "; checkpoint written" << endl; break; }
 }
 cout << "done. wall time " << (clock() - clk0) << " s" << endl;

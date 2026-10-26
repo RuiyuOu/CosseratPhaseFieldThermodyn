@@ -1,1 +1,2 @@
 task 3: compression 1 GPa, shear 0.1 GPa, tag lad_P1000MPa_S100MPa
+INCOMPLETE at step 461 (exit code 8): resubmit (restart-safe)

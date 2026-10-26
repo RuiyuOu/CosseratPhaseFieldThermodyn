@@ -11,6 +11,7 @@ D=out_$TAG; B=$TAG; mkdir -p $D
 export FF_LOADPATH=${FF_LOADPATH:-$(dirname $(find $(dirname $(dirname $(which FreeFem++)))/lib* -name msh3.so 2>/dev/null | head -1) 2>/dev/null)}
 done_p() { [ -s $D/${B}_log.csv ] && tail -1 $D/${B}_log.csv | cut -d, -f2 | awk -v e=$TEND '{exit !($1+0==$1 && $1>=e-0.011)}'; }
 done_p && { echo "already complete"; exit 0; }
+[ -e $D/${B}_TSTOP.txt ] && { echo "ended at the temperature limit:"; cat $D/${B}_TSTOP.txt; exit 0; }
 [ -e $D/STALLED ] && { echo "STALLED earlier (see $D/STALLED); fix the cause, then delete $D/STALLED to retry"; exit 1; }
 maxstep() { [ -s $D/${B}_log.csv ] && awk -F, '$1+0==$1 && $1>m {m=$1} END{print m+0}' $D/${B}_log.csv || echo 0; }
 S0=$(maxstep)
@@ -27,6 +28,7 @@ FreeFem++ -nw -v 0 cosserat2d.edp $ARGS -out $D/$B -restart $D/${B}_ck.txt >> $D
 RC=$?
 S1=$(maxstep)
 if done_p; then echo COMPLETE
+elif [ -e $D/${B}_TSTOP.txt ]; then echo "ENDED at the temperature limit:"; cat $D/${B}_TSTOP.txt
 elif [ "$S1" -le "$S0" ]; then
   { echo "STALLED: no new steps beyond step $S0 (solver exit code $RC) at $(date)"; echo "--- last lines of $D/$B.out ---"; tail -n 25 $D/$B.out; } | tee $D/STALLED
   exit 1
