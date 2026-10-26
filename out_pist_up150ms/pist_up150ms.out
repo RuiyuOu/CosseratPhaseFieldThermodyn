@@ -1,0 +1,31 @@
+variant A  j=0.01 um^2  muc=75.4  amp=1 GPa  dir=piston  dt=0.01  steps=3100  nt=58391  ndof=263775
+restarted from out_pist_up150ms/pist_up150ms_ck.txt at step 100 t=0
+step 150 t=0.5 it=12 KE=0.830894 Wext=0 res=-1.91234 maxslip=0.113864 dTmax=6.94624  wall=1284.38 s
+step 200 t=1 it=11 KE=2.79658 Wext=0 res=-6.09458 maxslip=0.209841 dTmax=7.44122  wall=2457.78 s
+step 250 t=1.5 it=11 KE=4.75484 Wext=0 res=-10.2592 maxslip=0.210146 dTmax=7.30804  wall=3526.67 s
+step 300 t=2 it=10 KE=6.74989 Wext=0 res=-14.4249 maxslip=0.213763 dTmax=7.20272  wall=4531.73 s
+step 350 t=2.5 it=8 KE=8.46904 Wext=0 res=-18.5846 maxslip=0.213768 dTmax=7.11098  wall=5481.09 s
+step 400 t=3 it=9 KE=6.50581 Wext=0 res=-20.1923 maxslip=0.22742 dTmax=11.3074  wall=6433.2 s
+step 450 t=3.5 it=8 KE=2.40484 Wext=0 res=-20.1923 maxslip=0.255043 dTmax=11.3182  wall=7365.09 s
+step 500 t=4 it=11 KE=0.211562 Wext=0 res=-20.1923 maxslip=0.255263 dTmax=11.1099  wall=8331.63 s
+step 550 t=4.5 it=14 KE=3.41825 Wext=0 res=-20.1923 maxslip=0.255263 dTmax=10.9382  wall=9460.08 s
+step 600 t=5 it=12 KE=6.8318 Wext=0 res=-20.1923 maxslip=0.231387 dTmax=11.1515  wall=10520.7 s
+step 650 t=5.5 it=10 KE=5.51988 Wext=0 res=-20.1923 maxslip=0.230405 dTmax=15.8838  wall=11427.9 s
+step 700 t=6 it=11 KE=1.65839 Wext=0 res=-20.1923 maxslip=0.219688 dTmax=15.4785  wall=12431.4 s
+step 750 t=6.5 it=10 KE=0.343635 Wext=0 res=-20.1923 maxslip=0.220202 dTmax=15.1134  wall=13433.7 s
+step 800 t=7 it=12 KE=3.48917 Wext=0 res=-20.1923 maxslip=0.217843 dTmax=14.8665  wall=14670.2 s
+step 850 t=7.5 it=10 KE=6.38261 Wext=0 res=-20.1923 maxslip=0.231149 dTmax=15.745  wall=15797.8 s
+step 900 t=8 it=11 KE=4.60401 Wext=0 res=-20.1923 maxslip=0.237439 dTmax=17.2865  wall=17018.3 s
+step 950 t=8.5 it=9 KE=1.07282 Wext=0 res=-20.1923 maxslip=0.240108 dTmax=17.6376  wall=17955.8 s
+step 1000 t=9 it=10 KE=0.531262 Wext=0 res=-20.1923 maxslip=0.252507 dTmax=17.6612  wall=18956.8 s
+step 1050 t=9.5 it=10 KE=3.54388 Wext=0 res=-20.1923 maxslip=0.264841 dTmax=17.4668  wall=20047.8 s
+step 1100 t=10 it=9 KE=5.76007 Wext=0 res=-20.1923 maxslip=0.222052 dTmax=18.7776  wall=21216.7 s
+step 1150 t=10.5 it=10 KE=3.70558 Wext=0 res=-20.1923 maxslip=0.217749 dTmax=21.0761  wall=22227.8 s
+nan != nan diff nan => Sorry error in Optimization (e) add:  int2d(Th,optimize=0)(...)
+ remark if you add  (..  ,   optimize=2) then  you remove this check (be careful); 
+  current line = 948
+Exec error : In Optimized version 
+   -- number :1
+Exec error : In Optimized version 
+   -- number :1
+ err code 8 ,  mpirank 0
