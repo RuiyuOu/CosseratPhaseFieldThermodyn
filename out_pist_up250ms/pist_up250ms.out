@@ -1,0 +1,25 @@
+variant A  j=0.01 um^2  muc=75.4  amp=1 GPa  dir=piston  dt=0.01  steps=3100  nt=58391  ndof=263775
+restarted from out_pist_up250ms/pist_up250ms_ck.txt at step 100 t=0
+step 150 t=0.5 it=13 KE=2.24533 Wext=0 res=-4.85171 maxslip=0.204073 dTmax=18.4338  wall=1536.33 s
+step 200 t=1 it=18 KE=7.71408 Wext=0 res=-16.3768 maxslip=0.383644 dTmax=18.082  wall=2910.99 s
+step 250 t=1.5 it=11 KE=13.1837 Wext=0 res=-27.8788 maxslip=0.383661 dTmax=17.5864  wall=4107.39 s
+step 300 t=2 it=12 KE=18.7331 Wext=0 res=-39.3852 maxslip=0.384731 dTmax=17.1641  wall=5263.25 s
+step 350 t=2.5 it=9 KE=23.7103 Wext=0 res=-50.8762 maxslip=0.384731 dTmax=16.7923  wall=6304.81 s
+step 400 t=3 it=40 KE=18.8021 Wext=0 res=-55.3514 maxslip=0.384727 dTmax=23.9979  wall=7437.02 s
+step 450 t=3.5 it=16 KE=7.59294 Wext=0 res=-55.3514 maxslip=0.445799 dTmax=24.4879  wall=8728.81 s
+step 500 t=4 it=16 KE=0.400969 Wext=0 res=-55.3513 maxslip=0.474606 dTmax=23.85  wall=10092.4 s
+step 550 t=4.5 it=16 KE=8.52521 Wext=0 res=-55.3512 maxslip=0.475088 dTmax=23.4383  wall=11515.1 s
+step 600 t=5 it=17 KE=18.4456 Wext=0 res=-55.351 maxslip=0.35815 dTmax=25.4761  wall=13102.4 s
+step 650 t=5.5 it=15 KE=17.5094 Wext=0 res=-55.3508 maxslip=0.360447 dTmax=39.3514  wall=14556.9 s
+step 700 t=6 it=12 KE=6.99923 Wext=0 res=-55.3508 maxslip=0.364314 dTmax=38.2209  wall=16231.1 s
+step 750 t=6.5 it=15 KE=0.454224 Wext=0 res=-55.3507 maxslip=0.378057 dTmax=37.4423  wall=17752.7 s
+step 800 t=7 it=17 KE=7.4193 Wext=0 res=-55.3506 maxslip=0.357296 dTmax=36.6628  wall=19374 s
+step 850 t=7.5 it=13 KE=16.7407 Wext=0 res=-55.3504 maxslip=0.358193 dTmax=37.4431  wall=21342.9 s
+step 900 t=8 it=17 KE=16.2869 Wext=0 res=-55.3502 maxslip=0.359108 dTmax=40.3335  wall=23129.7 s
+step 950 t=8.5 it=12 KE=6.51001 Wext=0 res=-55.3501 maxslip=0.380525 dTmax=42.0009  wall=24620.1 s
+step 1000 t=9 it=12 KE=0.557023 Wext=0 res=-55.35 maxslip=0.456757 dTmax=42.0063  wall=26110.6 s
+step 1050 t=9.5 it=15 KE=6.66658 Wext=0 res=-55.3498 maxslip=0.478971 dTmax=41.7482  wall=27456.5 s
+step 1100 t=10 it=17 KE=15.2518 Wext=0 res=-55.3496 maxslip=0.375793 dTmax=43.6479  wall=28746.8 s
+step 1150 t=10.5 it=15 KE=14.877 Wext=0 res=-55.3493 maxslip=0.365342 dTmax=60.5379  wall=30051.3 s
+TSTOP at step 1160 t=10.6 max T=4294.77
+done. wall time 30374.5 s
