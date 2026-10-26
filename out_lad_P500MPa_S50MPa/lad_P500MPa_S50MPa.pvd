@@ -18,5 +18,6 @@
     <DataSet timestep="0.75" file="lad_P500MPa_S50MPa_s75.vtu"/>
     <DataSet timestep="0.8" file="lad_P500MPa_S50MPa_s80.vtu"/>
     <DataSet timestep="0.85" file="lad_P500MPa_S50MPa_s85.vtu"/>
+    <DataSet timestep="0.9" file="lad_P500MPa_S50MPa_s90.vtu"/>
   </Collection>
 </VTKFile>

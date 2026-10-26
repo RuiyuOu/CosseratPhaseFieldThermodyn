@@ -8,5 +8,9 @@
     <DataSet timestep="0.5" file="pist_up50ms_s50.vtu"/>
     <DataSet timestep="0.6" file="pist_up50ms_s60.vtu"/>
     <DataSet timestep="0.7" file="pist_up50ms_s70.vtu"/>
+    <DataSet timestep="0.8" file="pist_up50ms_s80.vtu"/>
+    <DataSet timestep="0.9" file="pist_up50ms_s90.vtu"/>
+    <DataSet timestep="1" file="pist_up50ms_s100.vtu"/>
+    <DataSet timestep="1.1" file="pist_up50ms_s110.vtu"/>
   </Collection>
 </VTKFile>

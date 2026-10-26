@@ -10,5 +10,9 @@
     <DataSet timestep="0.7" file="pist_up400ms_s70.vtu"/>
     <DataSet timestep="0.8" file="pist_up400ms_s80.vtu"/>
     <DataSet timestep="0.9" file="pist_up400ms_s90.vtu"/>
+    <DataSet timestep="1" file="pist_up400ms_s100.vtu"/>
+    <DataSet timestep="1.1" file="pist_up400ms_s110.vtu"/>
+    <DataSet timestep="1.2" file="pist_up400ms_s120.vtu"/>
+    <DataSet timestep="1.3" file="pist_up400ms_s130.vtu"/>
   </Collection>
 </VTKFile>
