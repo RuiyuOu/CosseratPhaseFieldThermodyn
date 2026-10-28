@@ -1,4 +1,7 @@
-# HPC bundle: dynamic Cosserat-KWC 15 ns, variants A and F
+The deliver_pist_up250ms directory has the gif animations and graphics used in the write up. the anim directories have pngs of each snapshot. 
+the out_ directories have the data for each snapshot. Please do not git clone the entire thing, there are GBs of data files here. 
+
+# HPC bundle: dynamic Cosserat-KWC
 Contents: cosserat2d.edp (finite-deformation solver), mesh_A.msh, mesh_F.msh, run_dyn.sh, run_dyn_{A,F}.sbatch, run_post.sbatch,
 submit_all.sh, post/ (wavepost.py, animate.py, package.sh, SMOOTHING.md).
 Use: unzip, cd into the folder, `bash submit_all.sh [N]` submits a chain of N (default 4) restart-safe jobs per variant: each resumes from the last checkpoint, so no manual resubmission is needed. Manual: `sbatch run_dyn_A.sbatch` again resumes too.
@@ -34,11 +37,13 @@ Post-process one level: cd post; BASE=lad_P1000MPa_S100MPa NP=4 python3 animate.
 (misrotation vs grain median developed since the first frame), largest region size in nm, position, mean T and rhoS) and nuc_P10000_nucleus_last.png.
 Baseline: the 15 ns shear run gives zero new phi-drop and zero pocket area (negative control).
 
-## Confined piston ladder (cold-spray analogue), 30 ns, variant A  -- NEW solver option -dir piston
+## Confined piston ladder (cold-spray analogue), 30 ns, variants A and F  -- NEW solver option -dir piston
 Set-up: wall u_x=0 (left), rollers u_y=0 (top and bottom, exactly 0), right edge prescribed u_x = -d(t); d(t) = integral of u_p*e(t), e = smooth quintic ramp up (-ptr, default 0.5 ns), hold (-pth, default 2 ns), ramp down;
 piston travel = u_p*(ptr+pth) (u_p=250 m/s -> 0.625 um = 6.25 %); afterwards the piston stays put and the block evolves to 30 ns. Arguments: -pistonup (um/ns = 1000 m/s), -ptr, -pth, -tstop (K).
-`bash submit_piston.sh [N]`: 6 array tasks u_p = 25, 50, 100, 150, 250, 400 m/s (impact 50 ... 800 m/s; Cu shock-fit pressure 0.9 ... 16 GPa), TEND=30 ns, dt=0.01 ns (3000 loaded steps),
+`bash submit_piston.sh [N]`: 12 array tasks = variants A (tasks 0-5, out_pist_up<m/s>ms) and F (tasks 6-11, out_pistF_up<m/s>ms, no relaxation stage, starts fresh), u_p = 25, 50, 100, 150, 250, 400 m/s (impact 50 ... 800 m/s; Cu shock-fit pressure 0.9 ... 16 GPa), TEND=30 ns, dt=0.01 ns (3000 loaded steps),
 frames every 0.1 ns (VTKEVERY=10 steps; ~300 frames, ~13 MB each), 24 h per job, N chained arrays (default 6) resume from checkpoints. Outputs out_pist_up<m/s>ms/.
 Safeguard: -tstop 1400 K (override with TSTOP=...): a level that exceeds it (or gives NaN) writes a final frame (..._tstop<step>.vtu), a checkpoint and <tag>_TSTOP.txt and ends cleanly (counted as finished).
 Notes: W_ext / audit_residual columns are not meaningful in piston mode (no traction work is accumulated). The relaxed state is reused (left wall u_y freed, rollers set u_y=0 at the first piston step).
 Post: `sbatch run_post_piston.sbatch` (needs setup_py.sh once); nucleus_probe.py works on these folders too (BASE=pist_up250ms).
+
+Variant F only: `bash submit_piston_F.sh [N]` (6 array tasks, out_pistF_up<m/s>ms/) and `sbatch run_post_piston_F.sbatch` for its post-processing.
