@@ -1,0 +1,32 @@
+variant A  j=0.01 um^2  muc=75.4  amp=1 GPa  dir=piston  dt=0.005  steps=6100  nt=58391  ndof=263775
+rho_M initialised quasi-steady (no side file)
+restarted from out_pistM3v2_dt0.005_nr10_up25ms/pistM3v2_dt0.005_nr10_up25ms_ck.txt at step 100 t=0
+relaxfix: end-of-relaxation reset applied to the relaxed checkpoint
+relaxfix: E0=0.0373476
+step 150 t=0.25 it=7 KE=0.00176853 Wext=0 res=-0.00335432 maxslip=0.00940095 dTmax=0.0111063  wall=1207.61 s
+step 200 t=0.5 it=6 KE=0.024683 Wext=0 res=-0.0498722 maxslip=0.0092428 dTmax=0.121277  wall=2356.46 s
+step 250 t=0.75 it=5 KE=0.0538795 Wext=0 res=-0.111268 maxslip=0.00867956 dTmax=0.208877  wall=3526.37 s
+step 300 t=1 it=6 KE=0.0816784 Wext=0 res=-0.17116 maxslip=0.0102847 dTmax=0.237789  wall=4699.65 s
+step 350 t=1.25 it=5 KE=0.108729 Wext=0 res=-0.230308 maxslip=0.0110721 dTmax=0.25481  wall=5825.17 s
+step 400 t=1.5 it=5 KE=0.135331 Wext=0 res=-0.288707 maxslip=0.0115378 dTmax=0.26054  wall=6928.05 s
+step 450 t=1.75 it=5 KE=0.162094 Wext=0 res=-0.3468 maxslip=0.0115366 dTmax=0.261537  wall=8008.63 s
+step 500 t=2 it=5 KE=0.189294 Wext=0 res=-0.405163 maxslip=0.0120028 dTmax=0.260005  wall=9123.06 s
+step 550 t=2.25 it=5 KE=0.215228 Wext=0 res=-0.463444 maxslip=0.0120101 dTmax=0.258437  wall=10262.8 s
+step 600 t=2.5 it=5 KE=0.226959 Wext=0 res=-0.521601 maxslip=0.0120101 dTmax=0.257153  wall=11415.1 s
+step 650 t=2.75 it=5 KE=0.20874 Wext=0 res=-0.563548 maxslip=0.0120101 dTmax=0.330469  wall=12568.3 s
+step 700 t=3 it=5 KE=0.157403 Wext=0 res=-0.565747 maxslip=0.0165342 dTmax=0.495934  wall=13738.4 s
+step 750 t=3.25 it=6 KE=0.099934 Wext=0 res=-0.565747 maxslip=0.0208515 dTmax=0.571027  wall=14927.8 s
+step 800 t=3.5 it=6 KE=0.0422501 Wext=0 res=-0.565747 maxslip=0.0240362 dTmax=0.584786  wall=16126.6 s
+step 850 t=3.75 it=6 KE=0.00734643 Wext=0 res=-0.565747 maxslip=0.025766 dTmax=0.585658  wall=17336 s
+step 900 t=4 it=5 KE=0.0155048 Wext=0 res=-0.565748 maxslip=0.0270565 dTmax=0.582477  wall=18503.4 s
+step 950 t=4.25 it=6 KE=0.0477202 Wext=0 res=-0.565748 maxslip=0.0282827 dTmax=0.577217  wall=19752.2 s
+step 1000 t=4.5 it=6 KE=0.0918033 Wext=0 res=-0.565748 maxslip=0.0286874 dTmax=0.571823  wall=21038.3 s
+step 1050 t=4.75 it=7 KE=0.132703 Wext=0 res=-0.565748 maxslip=0.0263661 dTmax=0.566092  wall=22351.2 s
+step 1100 t=5 it=7 KE=0.152378 Wext=0 res=-0.565748 maxslip=0.0242999 dTmax=0.640323  wall=23756 s
+step 1150 t=5.25 it=7 KE=0.136905 Wext=0 res=-0.565748 maxslip=0.0208954 dTmax=0.825075  wall=25173.1 s
+step 1200 t=5.5 it=7 KE=0.0991166 Wext=0 res=-0.565748 maxslip=0.0167298 dTmax=0.905991  wall=26574.4 s
+step 1250 t=5.75 it=7 KE=0.0522197 Wext=0 res=-0.565748 maxslip=0.0179719 dTmax=0.924634  wall=27914.1 s
+step 1300 t=6 it=7 KE=0.014265 Wext=0 res=-0.565748 maxslip=0.019591 dTmax=0.919034  wall=29422.9 s
+step 1350 t=6.25 it=7 KE=0.00318361 Wext=0 res=-0.565748 maxslip=0.0206944 dTmax=0.910692  wall=30890.9 s
+TSTOP at step 1365 t=6.325 max T=42763.4
+done. wall time 31426.6 s
