@@ -1,0 +1,21 @@
+// probe: PETSc in this FreeFem build.  run (MPI module loaded):  mpirun -np 2 FreeFem++-mpi -nw probe_mpi.edp
+load "PETSc"
+macro dimension()2// EOM
+include "macro_ddm.idp"
+mesh Th = square(40, 40);
+Mat A;
+int[int] n2o;
+macro ThN2O()n2o// EOM
+buildDmesh(Th)
+createMat(Th, A, P1)
+fespace Vh(Th, P1);
+varf va(u, v) = int2d(Th)(dx(u)*dx(v) + dy(u)*dy(v)) + int2d(Th)(v) + on(1, 2, 3, 4, u = 0);
+A = va(Vh, Vh);
+real[int] b = va(0, Vh);
+set(A, sparams = "-ksp_type cg -pc_type hypre -ksp_rtol 1e-10");
+Vh u; u[] = A^-1*b;
+real m = u[].max, mg; mpiAllReduce(m, mg, mpiCommWorld, mpiMAX);
+cout << "rank " << mpirank << " of " << mpisize << ": PETSc OK, local triangles " << Th.nt << ", max u = " << mg << " (expect ~0.0737)" << endl;
+set(A, sparams = "-ksp_type gmres -pc_type gamg -ksp_rtol 1e-10"); u[] = A^-1*b;
+m = u[].max; mpiAllReduce(m, mg, mpiCommWorld, mpiMAX);
+cout << "rank " << mpirank << ": GAMG OK, max u = " << mg << endl;

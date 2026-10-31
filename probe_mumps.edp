@@ -1,0 +1,6 @@
+// probe 2: parallel direct solver.  run:  mpirun -np 2 FreeFem++-mpi -nw probe_mumps.edp
+load "MUMPS"
+mesh Th = square(40, 40); fespace Vh(Th, P1); Vh u, v;
+varf a(u, v) = int2d(Th)(dx(u)*dx(v) + dy(u)*dy(v) + u*v) + on(1, 2, 3, 4, u = 0);
+matrix A = a(Vh, Vh, solver = sparsesolver); real[int] b = a(0, Vh); b = 1; u[] = A^-1*b;
+cout << "rank " << mpirank << ": MUMPS OK, max u = " << u[].max << endl;
