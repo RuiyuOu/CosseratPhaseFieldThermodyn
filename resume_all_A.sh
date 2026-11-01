@@ -6,6 +6,7 @@
 #   RUNTAG=gm bash resume_all_A.sh                       # DT = 0.01 ns, NREF = 20   -> out_pistM3v2RcV_gm_up<speed>ms
 #   RUNTAG=gm DT=0.005 NREF=10 bash resume_all_A.sh      # half dt, NREF 10           -> out_pistM3v2RcV_dt0.005_nr10_gm_up<speed>ms
 #   MPI=1: the MPI runs (tag suffix _mpi, submits run_all_A_mpi.sh; NP, MEM as there); GNDPHI2=0: the runs without the phi^2 GND weight (tag G)
+#   ANGLE (default 45, as in the run scripts; ANGLE=confined for the old confined-piston runs, e.g. the bk series)
 #   optional: N=20 chained arrays (default 20); TBLOW=5000: a TSTOP above this max T (K) counts as a numerical blow-up and is rolled
 #   back (below it the run genuinely reached -tstop, i.e. melting, and is left stopped); FORCE=1 submits even if a level of this tag is still running.
 set -uo pipefail
@@ -15,12 +16,13 @@ N=${N:-20}; TBLOW=${TBLOW:-5000}
 G=""; [ "${GNDPHI2:-1}" = 0 ] && G=G; export GNDPHI2=${GNDPHI2:-1}
 SFX=M3v2${G}RcV; { [ "$DT" != 0.01 ] || [ "$NREF" != 20 ]; } && SFX=${SFX}_dt${DT}_nr${NREF}; [ -n "${RUNTAG:-}" ] && SFX=${SFX}_${RUNTAG}
 [ "${MPI:-0}" = 1 ] && [ "${SHARETAG:-0}" != 1 ] && SFX=${SFX}_mpi
+ATAG=""; [ "${ANGLE:-45}" != confined ] && ATAG=_a${ANGLE:-45}; export ANGLE=${ANGLE:-45}   # ANGLE=confined: the old confined-piston runs
 # never run two jobs on the same output directory: a level whose stage file was written in the last 20 min is still running
-BUSY=""; for UP in 25 50 100 150 250 400; do f=out_pist${SFX}_up${UP}ms/pist${SFX}_up${UP}ms_stage.txt; [ -n "$(find $f -mmin -20 2>/dev/null)" ] && BUSY="$BUSY ${UP}"; done
+BUSY=""; for UP in 25 50 100 150 250 400; do f=out_pist${SFX}${ATAG}_up${UP}ms/pist${SFX}${ATAG}_up${UP}ms_stage.txt; [ -n "$(find $f -mmin -20 2>/dev/null)" ] && BUSY="$BUSY ${UP}"; done
 if [ -n "$BUSY" ] && [ "${FORCE:-0}" != 1 ]; then
-  echo "still running (stage file updated < 20 min ago) at u_p =$BUSY m/s for tag pist${SFX}: wait for those jobs or scancel them; FORCE=1 to override"; exit 1; fi
+  echo "still running (stage file updated < 20 min ago) at u_p =$BUSY m/s for tag pist${SFX}${ATAG}: wait for those jobs or scancel them; FORCE=1 to override"; exit 1; fi
 for UP in 25 50 100 150 250 400; do
-  B=pist${SFX}_up${UP}ms; D=out_$B
+  B=pist${SFX}${ATAG}_up${UP}ms; D=out_$B
   [ -d $D ] || { echo "$B: not started yet (will start fresh)"; continue; }
   if [ -e $D/${B}_TSTOP.txt ]; then
     TM=$(grep -o 'max T = [0-9.e+]*' $D/${B}_TSTOP.txt | awk '{print $4}')

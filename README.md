@@ -202,3 +202,25 @@ Replay from the step-722 checkpoint (2 ranks):
 * both: steps 723-730 converge in 6-10 iterations each; the prescribed |a| is 0 and the free-dof residue is no longer driven.
 Not in the run tag, so stopped runs resume under the same tag (resume_all_A.sh clears the NOCONV marker; the NOCONV checkpoint is clean).
 Serial copies already patched with the spin fix can be updated in place with `bash apply_bckin_serial.sh` (atomic, safe while jobs run).
+
+## Angled plate impact (2026-11-01): -dir shearpiston, ANGLE
+The same plate-speed ladder V = 25 50 100 150 250 400 m/s, with the plate velocity at an angle ANGLE (degrees) from -x:
+u_n = V cos(ANGLE) (compression, -x) and u_t = V sin(ANGLE) (shear, +y). ANGLE = 0 is pure compression, 90 is pure shear; the script default is 45.
+Boundary conditions (the same for every angle, so the angle is the only variable):
+* left edge clamped (u = 0, no-slip substrate);
+* right edge the plate: u_x = -d_n(t), u_y = +d_t(t), same quintic ramp / hold / ramp-down as the piston (RAMP, HOLD), exact plate kinematics via -bckin;
+* top and bottom edges traction-free.
+ANGLE = 0 here is therefore NOT the old confined piston (that had rollers on the top and bottom edges and a frictionless wall), and the two are not comparable one to one.
+ANGLE=confined runs the old confined piston under the old tag (no _a), so existing runs resume.
+Solver options: -dir shearpiston -pistonup <u_n um/ns> -pistonut <u_t um/ns>. The run scripts compute both from V and ANGLE. Tag: ..._a<ANGLE>_up<V>ms.
+Notes:
+* 400 m/s of shear needs a plastic rate of ~1e8-1e9 /s in a band. The relativistic-drag ceiling rho_m b v_c is ~5e7 /s per system at the default
+  RHOMSAT = 100 um^-2 (1e14 m^-2), so the response at high shear speeds is largely elastic unless RHOMSAT is raised (1e15-1e16 m^-2 = 1000-10000 um^-2 is typical of high-rate Cu).
+* The tangential travel is V sin(ANGLE) (RAMP + HOLD) (1 um at 90 deg / 400 m/s); localized, that is a shear strain of O(1).
+  The Lagrangian mesh distorts there, and a shorter HOLD is the cautious first run.
+Examples (MPI):
+
+    RUNTAG=bk bash run_all_A_mpi.sh                 # 45 deg  -> out_pistM3v2RcV_bk_mpi_a45_up<V>ms
+    RUNTAG=bk ANGLE=90 bash run_all_A_mpi.sh        # pure shear
+    RUNTAG=bk ANGLE=0 bash run_all_A_mpi.sh         # pure compression with the plate BCs
+    MPI=1 RUNTAG=bk ANGLE=45 bash resume_all_A.sh   # resume; ANGLE=confined for the earlier confined-piston bk series

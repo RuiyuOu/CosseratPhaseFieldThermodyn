@@ -1,7 +1,11 @@
 #!/bin/bash
+#   ANGLE (default 45): plate-impact angle in degrees from -x. The plate speed V (first argument) splits into u_n = V cos(ANGLE) (compression, -x) and
+#     u_t = V sin(ANGLE) (shear, +y): 0 = pure compression, 90 = pure shear. Plate BCs (-dir shearpiston): left edge clamped, right edge the plate,
+#     top/bottom traction-free. Tag gets _a<ANGLE>. ANGLE=confined = the old confined piston (-dir piston: rollers top/bottom, frictionless wall), old tag.
 # Mobile-density drag variant (cosserat2d_mob.edp). Env: DRAGRHO (default 3 = evolved mobile density), VC (default 2 km/s relativistic drag; 0 = off),
 #   RHOMSAT (100 um^-2), C2M (10), RHOFCUT (1e4 um^-2), RHOMMIN (1), GNDPHI2 (default 1 = original), RECOV (default 2 = Ask 2019 Eq. 80: Heaviside(phi_dot) tanh(C_A^2|grad theta|^2); 0 = original |dphi|), CA (sqrt 10 um), CD (default 100 for RECOV=2, else 10), RELAXFIX (default 1), DT (default 0.01 ns), NREF (default 20 steps),
-#   SPINBRANCH (default 0.785398 = pi/4: keeps the GB-spin increment on the principal root of the pi-periodic spin equation; never binds a physical increment ~1e-3 rad; 0 = off = old), SPINMAX (default 0 = off; >0 bounds |dw*| per step, rad), ONFAIL (retry|stop|commit, default retry), MAXITRETRY (80), CKROLL (default 20 steps; rolling pre-crash checkpoints <tag>_ckroll{0,1}.txt), EXACTEXP (1).
+#   BCKIN (default 1: piston face/rollers/wall carry their exact prescribed velocity and acceleration instead of the Newmark recursion, which grows linearly there; 0 = old),
+#   PREDICTOR (default vel: Newton starts from U + dt V; avg = old U + dt V + dt^2/4 A; none), SPINBRANCH (default 0.785398 = pi/4: keeps the GB-spin increment on the principal root of the pi-periodic spin equation; never binds a physical increment ~1e-3 rad; 0 = off = old), SPINMAX (default 0 = off; >0 bounds |dw*| per step, rad), ONFAIL (retry|stop|commit, default retry), MAXITRETRY (80), CKROLL (default 20 steps; rolling pre-crash checkpoints <tag>_ckroll{0,1}.txt), EXACTEXP (1).
 #   EOS (default vinet; murnaghan | svk = old SVK), KP (5.0), K0 (default cubic bulk modulus 137.1 GPa), VOLTAN (1: volumetric tangent correction).
 #   NEWTON (default full: tangent rebuilt every global iteration + line search; modified = old), TOLRES (1e-6), RESFLOOR (1e-8), LSMAX (6), MAXIT (40). NREF only matters for NEWTON=modified.
 #   TANGENT (default consistent: element tangent incl. finite strain/EOS and the implicit slip+spin response; approx = old), POLISH (20 coupled local Newton its), FDK, FDQ.
@@ -16,6 +20,14 @@
 set -uo pipefail
 UPMS=${1:?piston velocity in m/s}; TEND=${2:-30}; TR=${3:-0.5}; TH=${4:-2.0}; VE=${5:-10}; V=${6:-A}
 UP=$(awk -v u=$UPMS 'BEGIN{printf "%g", u/1000}')           # um/ns
+ANG=${ANGLE:-45}
+if [ "$ANG" = confined ]; then DIRARGS="-dir piston -pistonup $UP"; ATAG=""
+else
+  awk -v a="$ANG" 'BEGIN{exit !(a+0==a && a>=0 && a<=90)}' || { echo "ANGLE must be 0..90 (degrees from -x) or confined"; exit 1; }
+  UN=$(awk -v u=$UP -v a=$ANG 'BEGIN{v=u*cos(a*atan2(0,-1)/180); if (v<1e-12) v=0; printf "%.10g", v}')   # normal (compression) um/ns
+  UT=$(awk -v u=$UP -v a=$ANG 'BEGIN{v=u*sin(a*atan2(0,-1)/180); if (v<1e-12) v=0; printf "%.10g", v}')   # tangential (+y) um/ns
+  DIRARGS="-dir shearpiston -pistonup $UN -pistonut $UT"; ATAG="_a${ANG}"
+fi
 if [ "$V" = F ]; then echo "mobile-drag variant: variant A only"; exit 1; fi
 GP=${GNDPHI2:-1}; RC=${RECOV:-2}; CDV=${CD:-$([ "${RECOV:-2}" = 2 ] && echo 100 || echo 10)}; DR=${DRAGRHO:-3}; VCV=${VC:-2}; SFX="M${DR}v${VCV}"; [ "$GP" = 0 ] && SFX=${SFX}G; [ "$RC" != 0 ] && SFX=${SFX}R
 { [ "${DISSIP:-1}" != 0 ] || [ "${CDSTORE:-1}" != 0 ]; } && SFX=${SFX}c   # c: thermodynamically consistent heat source (implicit dissipation, storage cap)
@@ -25,7 +37,7 @@ SC=$(awk -v d=$DT 'BEGIN{printf "%d", 0.01/d + 0.5}'); [ "$SC" -ge 1 ] || SC=1; 
 [ "$DT" != 0.01 ] || [ "$NREF" != 20 ] && SFX=${SFX}_dt${DT}_nr${NREF}   # never resume a run with a different dt
 SM=${SPINMAX:-0}; [ "$SM" != 0 ] && SFX=${SFX}_sm${SM}
 [ -n "${RUNTAG:-}" ] && SFX=${SFX}_${RUNTAG}   # free label to keep a test series apart
-TAG=pist${SFX}_up${UPMS}ms; D=out_$TAG; B=$TAG; mkdir -p $D
+TAG=pist${SFX}${ATAG}_up${UPMS}ms; D=out_$TAG; B=$TAG; mkdir -p $D
 export FF_LOADPATH=${FF_LOADPATH:-$(dirname $(find $(dirname $(dirname $(which FreeFem++)))/lib* -name msh3.so 2>/dev/null | head -1) 2>/dev/null)}
 done_p() { [ -s $D/${B}_log.csv ] && tail -1 $D/${B}_log.csv | cut -d, -f2 | awk -v e=$TEND -v d=$DT '{exit !($1+0==$1 && $1>=e-1.1*d)}'; }
 done_p && { echo "already complete"; exit 0; }
@@ -50,7 +62,7 @@ fi
 touch $D/$B.pvd
 HDR="step,t_ns,load_GPa,iters,locres,KE_trans,KE_rot,E_elastic,E_stored,Q_heat,W_ext,D_cum,audit_residual,max_abs_slip,mean_abs_slip,max_dT,max_abs_dtheta_deg,mean_rhoS_um2,max_rhoG_um2,min_phi,neg_D_count"
 [ -n "$R" ] && { [ -s $D/${B}_log.csv ] || echo "$HDR" > $D/${B}_log.csv; }   # fresh F start: the solver writes its own header
-ARGS="-variant $V -j 0.01 -amp 1 -dir piston -pistonup $UP -ptr $TR -pth $TH -tend $TEND -dt $DT -muc 75.4 -nref $NREF -vtkevery $VE -ckevery $CKE -tstop ${TSTOP:-1400} -f0 0.005944 -kwca 0.10 -kwcs 1.05 -kwce 0.004 -kwcd 0.005 -gndphi2 $GP -recov $RC -ca ${CA:-3.16227766} -cd $CDV -diag ${DIAG:-1} -dragrho $DR -vc $VCV -rhomsat ${RHOMSAT:-100} -c2m ${C2M:-10} -rhofcut ${RHOFCUT:-1e4} -rhommin ${RHOMMIN:-1} -relaxfix ${RELAXFIX:-1} -exactexp ${EXACTEXP:-1} -spinmax $SM -spinbranch ${SPINBRANCH:-0.785398} -onfail ${ONFAIL:-retry} -maxitretry ${MAXITRETRY:-80} -ckroll ${CKROLL:-20} -dissip ${DISSIP:-1} -cdstore ${CDSTORE:-1} -softmin ${SOFTMIN:-0.01} -eos $EOSN -kp ${KP:-5.0} -k0 ${K0:-0} -voltan ${VOLTAN:-1} -newton ${NEWTON:-full} -tolres ${TOLRES:-1e-6} -resfloor ${RESFLOOR:-1e-8} -lsmax ${LSMAX:-6} -maxit ${MAXIT:-40} -nlocal ${NLOCAL:-30} -tangent ${TANGENT:-consistent} -polish ${POLISH:-20} -fdk ${FDK:-1e-6} -fdq ${FDQ:-1e-8} -linsolver ${LINSOLVER:-gmres} -lintol ${LINTOL:-1e-10} -precevery ${PRECEVERY:-0} -tanevery ${TANEVERY:-1} -slippred ${SLIPPRED:-0}"
+ARGS="-variant $V -j 0.01 -amp 1 $DIRARGS -ptr $TR -pth $TH -tend $TEND -dt $DT -muc 75.4 -nref $NREF -vtkevery $VE -ckevery $CKE -tstop ${TSTOP:-1400} -f0 0.005944 -kwca 0.10 -kwcs 1.05 -kwce 0.004 -kwcd 0.005 -gndphi2 $GP -recov $RC -ca ${CA:-3.16227766} -cd $CDV -diag ${DIAG:-1} -dragrho $DR -vc $VCV -rhomsat ${RHOMSAT:-100} -c2m ${C2M:-10} -rhofcut ${RHOFCUT:-1e4} -rhommin ${RHOMMIN:-1} -relaxfix ${RELAXFIX:-1} -exactexp ${EXACTEXP:-1} -spinmax $SM -spinbranch ${SPINBRANCH:-0.785398} -bckin ${BCKIN:-1} -predictor ${PREDICTOR:-vel} -onfail ${ONFAIL:-retry} -maxitretry ${MAXITRETRY:-80} -ckroll ${CKROLL:-20} -dissip ${DISSIP:-1} -cdstore ${CDSTORE:-1} -softmin ${SOFTMIN:-0.01} -eos $EOSN -kp ${KP:-5.0} -k0 ${K0:-0} -voltan ${VOLTAN:-1} -newton ${NEWTON:-full} -tolres ${TOLRES:-1e-6} -resfloor ${RESFLOOR:-1e-8} -lsmax ${LSMAX:-6} -maxit ${MAXIT:-40} -nlocal ${NLOCAL:-30} -tangent ${TANGENT:-consistent} -polish ${POLISH:-20} -fdk ${FDK:-1e-6} -fdq ${FDQ:-1e-8} -linsolver ${LINSOLVER:-gmres} -lintol ${LINTOL:-1e-10} -precevery ${PRECEVERY:-0} -tanevery ${TANEVERY:-1} -slippred ${SLIPPRED:-0}"
 EDP=cosserat2d_mob.edp
 if [ "${LINSOLVER:-gmres}" = gmres ] && ! ls ${FF_LOADPATH:-/nonexistent}/IncompleteCholesky.so >/dev/null 2>&1 && ! find $(dirname $(dirname $(which FreeFem++)))/lib* -name IncompleteCholesky.so 2>/dev/null | grep -q .; then
   echo "IncompleteCholesky plugin not found: using the direct solver (umfpack)"; sed '/^load "IncompleteCholesky"/d; s/iLU(Aeff, Lilu, Uilu);//; s/iluSolve(Lilu, Uilu, bb);//' cosserat2d_mob.edp > $D/cosserat2d_mob_noilu.edp

@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 N=${1:-20}
 export DT=${DT:-0.005} NREF=${NREF:-10}
 export TEND RAMP HOLD VTKEVERY TSTOP GNDPHI2 RECOV CA CD DIAG DRAGRHO VC RHOMSAT C2M RHOFCUT RHOMMIN RELAXFIX \
-       SPINMAX SPINBRANCH ONFAIL MAXITRETRY CKROLL EXACTEXP DISSIP CDSTORE SOFTMIN EOS KP K0 VOLTAN NEWTON TOLRES RESFLOOR LSMAX MAXIT NLOCAL TANGENT POLISH FDK FDQ LINSOLVER LINTOL PRECEVERY TANEVERY SLIPPRED RUNTAG
+       SPINMAX SPINBRANCH BCKIN PREDICTOR ANGLE ONFAIL MAXITRETRY CKROLL EXACTEXP DISSIP CDSTORE SOFTMIN EOS KP K0 VOLTAN NEWTON TOLRES RESFLOOR LSMAX MAXIT NLOCAL TANGENT POLISH FDK FDQ LINSOLVER LINTOL PRECEVERY TANEVERY SLIPPRED RUNTAG
 [ -s out_A/A_dyn_relaxed_ck.txt ] || { echo "missing out_A/A_dyn_relaxed_ck.txt (run the variant-A relaxation first)"; exit 1; }
 mkdir -p logs
 prev=$(sbatch --parsable --export=ALL run_piston_mob.sbatch)
@@ -22,4 +22,4 @@ for i in $(seq 2 "$N"); do
 done
 post=$(sbatch --parsable --export=ALL --dependency=afterany:$prev run_post_piston_mob.sbatch)
 echo "post-processing array: $post (starts after $prev)"
-echo "outputs: out_pistM3v2RcV_dt${DT}_nr${NREF}_up<speed>ms/   (check progress: tail -1 out_*/*_log.csv)"
+echo "outputs: out_pistM3v2RcV[_dt${DT}_nr${NREF}][_${RUNTAG:-}][_a${ANGLE:-45}]_up<speed>ms/   (check progress: tail -1 out_*/*_log.csv)"

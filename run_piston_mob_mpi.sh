@@ -1,4 +1,7 @@
 #!/bin/bash
+#   ANGLE (default 45): plate-impact angle in degrees from -x. The plate speed V (first argument) splits into u_n = V cos(ANGLE) (compression, -x) and
+#     u_t = V sin(ANGLE) (shear, +y): 0 = pure compression, 90 = pure shear. Plate BCs (-dir shearpiston): left edge clamped, right edge the plate,
+#     top/bottom traction-free. Tag gets _a<ANGLE>. ANGLE=confined = the old confined piston (-dir piston: rollers top/bottom, frictionless wall), old tag.
 # ===== MPI/PETSc version: same options, tags and file formats as run_piston_mob.sh, solver cosserat2d_mob_mpi.edp =====
 #   NP (default $SLURM_NTASKS, else 4) MPI ranks; MPIRUN launcher (default: the mpiexec recorded in ff-mpirun, else mpiexec/mpirun on PATH, else srun);
 #   PETSC: KSP/PC options for the (u, theta) Newton system (default GMRES + additive Schwarz with exact subdomain LU);
@@ -24,6 +27,14 @@
 set -uo pipefail
 UPMS=${1:?piston velocity in m/s}; TEND=${2:-30}; TR=${3:-0.5}; TH=${4:-2.0}; VE=${5:-10}; V=${6:-A}
 UP=$(awk -v u=$UPMS 'BEGIN{printf "%g", u/1000}')           # um/ns
+ANG=${ANGLE:-45}
+if [ "$ANG" = confined ]; then DIRARGS="-dir piston -pistonup $UP"; ATAG=""
+else
+  awk -v a="$ANG" 'BEGIN{exit !(a+0==a && a>=0 && a<=90)}' || { echo "ANGLE must be 0..90 (degrees from -x) or confined"; exit 1; }
+  UN=$(awk -v u=$UP -v a=$ANG 'BEGIN{v=u*cos(a*atan2(0,-1)/180); if (v<1e-12) v=0; printf "%.10g", v}')   # normal (compression) um/ns
+  UT=$(awk -v u=$UP -v a=$ANG 'BEGIN{v=u*sin(a*atan2(0,-1)/180); if (v<1e-12) v=0; printf "%.10g", v}')   # tangential (+y) um/ns
+  DIRARGS="-dir shearpiston -pistonup $UN -pistonut $UT"; ATAG="_a${ANG}"
+fi
 if [ "$V" = F ]; then echo "mobile-drag variant: variant A only"; exit 1; fi
 GP=${GNDPHI2:-1}; RC=${RECOV:-2}; CDV=${CD:-$([ "${RECOV:-2}" = 2 ] && echo 100 || echo 10)}; DR=${DRAGRHO:-3}; VCV=${VC:-2}; SFX="M${DR}v${VCV}"; [ "$GP" = 0 ] && SFX=${SFX}G; [ "$RC" != 0 ] && SFX=${SFX}R
 { [ "${DISSIP:-1}" != 0 ] || [ "${CDSTORE:-1}" != 0 ]; } && SFX=${SFX}c   # c: thermodynamically consistent heat source (implicit dissipation, storage cap)
@@ -34,7 +45,7 @@ SC=$(awk -v d=$DT 'BEGIN{printf "%d", 0.01/d + 0.5}'); [ "$SC" -ge 1 ] || SC=1; 
 SM=${SPINMAX:-0}; [ "$SM" != 0 ] && SFX=${SFX}_sm${SM}
 [ -n "${RUNTAG:-}" ] && SFX=${SFX}_${RUNTAG}   # free label to keep a test series apart
 [ "${SHARETAG:-0}" = 1 ] || SFX=${SFX}_mpi        # separate from the serial runs unless SHARETAG=1
-TAG=pist${SFX}_up${UPMS}ms; D=out_$TAG; B=$TAG; mkdir -p $D
+TAG=pist${SFX}${ATAG}_up${UPMS}ms; D=out_$TAG; B=$TAG; mkdir -p $D
 export FF_LOADPATH=${FF_LOADPATH:-$(dirname $(find $(dirname $(dirname $(which FreeFem++)))/lib* -name msh3.so 2>/dev/null | head -1) 2>/dev/null)}
 done_p() { [ -s $D/${B}_log.csv ] && tail -1 $D/${B}_log.csv | cut -d, -f2 | awk -v e=$TEND -v d=$DT '{exit !($1+0==$1 && $1>=e-1.1*d)}'; }
 done_p && { echo "already complete"; exit 0; }
@@ -59,7 +70,7 @@ fi
 touch $D/$B.pvd
 HDR="step,t_ns,load_GPa,iters,locres,KE_trans,KE_rot,E_elastic,E_stored,Q_heat,W_ext,D_cum,audit_residual,max_abs_slip,mean_abs_slip,max_dT,max_abs_dtheta_deg,mean_rhoS_um2,max_rhoG_um2,min_phi,neg_D_count"
 [ -n "$R" ] && { [ -s $D/${B}_log.csv ] || echo "$HDR" > $D/${B}_log.csv; }   # fresh F start: the solver writes its own header
-ARGS="-variant $V -j 0.01 -amp 1 -dir piston -pistonup $UP -ptr $TR -pth $TH -tend $TEND -dt $DT -muc 75.4 -nref $NREF -vtkevery $VE -ckevery $CKE -tstop ${TSTOP:-1400} -f0 0.005944 -kwca 0.10 -kwcs 1.05 -kwce 0.004 -kwcd 0.005 -gndphi2 $GP -recov $RC -ca ${CA:-3.16227766} -cd $CDV -diag ${DIAG:-1} -dragrho $DR -vc $VCV -rhomsat ${RHOMSAT:-100} -c2m ${C2M:-10} -rhofcut ${RHOFCUT:-1e4} -rhommin ${RHOMMIN:-1} -relaxfix ${RELAXFIX:-1} -exactexp ${EXACTEXP:-1} -spinmax $SM -spinbranch ${SPINBRANCH:-0.785398} -bckin ${BCKIN:-1} -predictor ${PREDICTOR:-vel} -onfail ${ONFAIL:-retry} -maxitretry ${MAXITRETRY:-80} -ckroll ${CKROLL:-20} -dissip ${DISSIP:-1} -cdstore ${CDSTORE:-1} -softmin ${SOFTMIN:-0.01} -eos $EOSN -kp ${KP:-5.0} -k0 ${K0:-0} -voltan ${VOLTAN:-1} -newton ${NEWTON:-full} -tolres ${TOLRES:-1e-6} -resfloor ${RESFLOOR:-1e-8} -lsmax ${LSMAX:-6} -maxit ${MAXIT:-40} -nlocal ${NLOCAL:-30} -tangent ${TANGENT:-consistent} -polish ${POLISH:-20} -fdk ${FDK:-1e-6} -fdq ${FDQ:-1e-8} -linsolver ${LINSOLVER:-gmres} -lintol ${LINTOL:-1e-10} -precevery ${PRECEVERY:-0} -tanevery ${TANEVERY:-1} -slippred ${SLIPPRED:-0}"
+ARGS="-variant $V -j 0.01 -amp 1 $DIRARGS -ptr $TR -pth $TH -tend $TEND -dt $DT -muc 75.4 -nref $NREF -vtkevery $VE -ckevery $CKE -tstop ${TSTOP:-1400} -f0 0.005944 -kwca 0.10 -kwcs 1.05 -kwce 0.004 -kwcd 0.005 -gndphi2 $GP -recov $RC -ca ${CA:-3.16227766} -cd $CDV -diag ${DIAG:-1} -dragrho $DR -vc $VCV -rhomsat ${RHOMSAT:-100} -c2m ${C2M:-10} -rhofcut ${RHOFCUT:-1e4} -rhommin ${RHOMMIN:-1} -relaxfix ${RELAXFIX:-1} -exactexp ${EXACTEXP:-1} -spinmax $SM -spinbranch ${SPINBRANCH:-0.785398} -bckin ${BCKIN:-1} -predictor ${PREDICTOR:-vel} -onfail ${ONFAIL:-retry} -maxitretry ${MAXITRETRY:-80} -ckroll ${CKROLL:-20} -dissip ${DISSIP:-1} -cdstore ${CDSTORE:-1} -softmin ${SOFTMIN:-0.01} -eos $EOSN -kp ${KP:-5.0} -k0 ${K0:-0} -voltan ${VOLTAN:-1} -newton ${NEWTON:-full} -tolres ${TOLRES:-1e-6} -resfloor ${RESFLOOR:-1e-8} -lsmax ${LSMAX:-6} -maxit ${MAXIT:-40} -nlocal ${NLOCAL:-30} -tangent ${TANGENT:-consistent} -polish ${POLISH:-20} -fdk ${FDK:-1e-6} -fdq ${FDQ:-1e-8} -linsolver ${LINSOLVER:-gmres} -lintol ${LINTOL:-1e-10} -precevery ${PRECEVERY:-0} -tanevery ${TANEVERY:-1} -slippred ${SLIPPRED:-0}"
 EDP=cosserat2d_mob_mpi.edp
 [ -s $EDP ] || { echo "FAILED: $EDP missing (generate it: python3 mpi/make_mpi.py cosserat2d_mob.edp cosserat2d_mob_mpi.edp)"; exit 1; }
 NP=${NP:-${SLURM_NTASKS:-4}}

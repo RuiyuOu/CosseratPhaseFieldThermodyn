@@ -42,6 +42,7 @@ string ldir  = arg("-dir", "shear");         // shear | comp | combo | piston (c
 real ampS    = atof(arg("-shear", "0"));    // combo: additional shear traction (GPa, +y) on the loaded edge, with compression -amp in x
 real tend    = atof(arg("-tend", "15"));     // ns
 real pistUp  = atof(arg("-pistonup", "0.25"));   // piston: particle velocity u_p in um/ns (= 1000 m/s)
+real pistUt  = atof(arg("-pistonut", "0"));      // shearpiston: tangential (+y) plate velocity in um/ns; same ramp/hold profile as -pistonup
 real pistTr  = atof(arg("-ptr", "0.5"));         // piston: ramp time (ns), smooth quintic up and down
 real pistTh  = atof(arg("-pth", "2.0"));         // piston: hold time at u_p (ns); total piston travel = u_p (tr + th)
 real dt      = atof(arg("-dt", "0.01"));     // ns
@@ -289,10 +290,14 @@ varf vKa([u1,u2,th],[v1,v2,ze]) =
            + kvc*(dx(u1) + dy(u2))*(dx(v1) + dy(v2)) );
 varf vMu([u1,u2,th],[v1,v2,ze]) = int2d(Th)(rho*(u1*v1 + u2*v2));
 varf vMt([u1,u2,th],[v1,v2,ze]) = int2d(Th)(rho*jz*th*ze);
-bool isP = (ldir == "piston");
-int LBa = 1, LBb = 1, LBc = 9999, LBd = 9999, LBe = 9999;      // label that constrains: left u1, left u2, bottom u2, top u2, right u1
+// -dir shearpiston (2026-11-01): left edge clamped (u = 0, no-slip substrate); right edge a moving plate, u_x = -d_n(t) (-pistonup,
+//   may be 0) and u_y = +d_t(t) (-pistonut); top and bottom traction-free (rollers would block the shear).
+bool isSP = (ldir == "shearpiston");
+bool isP = (ldir == "piston") || isSP;
+int LBa = 1, LBb = 1, LBc = 9999, LBd = 9999, LBe = 9999, LBf = 9999;      // label that constrains: left u1, left u2, bottom u2, top u2, right u1, right u2
 if (isP) { LBb = 9999; LBc = 2; LBd = 4; LBe = 3; }
-varf vBC([u1,u2,th],[v1,v2,ze]) = on(LBa, u1 = 0) + on(LBb, u2 = 0) + on(LBc, u2 = 0) + on(LBd, u2 = 0) + on(LBe, u1 = 0);
+if (isSP) { LBb = 1; LBc = 9999; LBd = 9999; LBe = 3; LBf = 3; }
+varf vBC([u1,u2,th],[v1,v2,ze]) = on(LBa, u1 = 0) + on(LBb, u2 = 0) + on(LBc, u2 = 0) + on(LBd, u2 = 0) + on(LBe, u1 = 0) + on(LBf, u2 = 0);
 
 real c0 = 4./(dt*dt), c1 = 4./dt;
 matrix Mu = vMu(Wh, Wh), Mt = vMt(Wh, Wh);
@@ -325,7 +330,7 @@ varf vAall([u1,u2,th],[v1,v2,ze]) =
   +
   int2d(Th)( H11*dx(th)*dx(ze) + H12*(dx(th)*dy(ze) + dy(th)*dx(ze)) + H22*dy(th)*dy(ze) )
   + int2d(Th, qft = qf1pT)( cD00*dx(u1)*dx(v1) + cD01*dy(u1)*dx(v1) + cD02*dx(u2)*dx(v1) + cD03*dy(u2)*dx(v1) + cD04*th*dx(v1) + cD10*dx(u1)*dy(v1) + cD11*dy(u1)*dy(v1) + cD12*dx(u2)*dy(v1) + cD13*dy(u2)*dy(v1) + cD14*th*dy(v1) + cD20*dx(u1)*dx(v2) + cD21*dy(u1)*dx(v2) + cD22*dx(u2)*dx(v2) + cD23*dy(u2)*dx(v2) + cD24*th*dx(v2) + cD30*dx(u1)*dy(v2) + cD31*dy(u1)*dy(v2) + cD32*dx(u2)*dy(v2) + cD33*dy(u2)*dy(v2) + cD34*th*dy(v2) + cD40*dx(u1)*ze + cD41*dy(u1)*ze + cD42*dx(u2)*ze + cD43*dy(u2)*ze + cD44*th*ze )
-  + on(LBa, u1 = 0) + on(LBb, u2 = 0) + on(LBc, u2 = 0) + on(LBd, u2 = 0) + on(LBe, u1 = 0);
+  + on(LBa, u1 = 0) + on(LBb, u2 = 0) + on(LBc, u2 = 0) + on(LBd, u2 = 0) + on(LBe, u1 = 0) + on(LBf, u2 = 0);
 int curStep = 0, curIt = -1, nanHit = 0; real curT = 0;   // (stage tracking, see mark())
 real tTanEl = 0, tTanAsm = 0, tTanFD = 0, tTanKc = 0, tTanPre = 0;
 matrix Kcons;
@@ -927,10 +932,12 @@ func int plasticRHS() {
   if (!isA) { rpl = Bk1*kq1[]; rhs += rpl; rpl = Bk2*kq2[]; rhs += rpl; }
   return 0;
 }
-varf vBCm([u1,u2,th],[v1,v2,ze]) = on(LBa, u1 = 1) + on(LBb, u2 = 1) + on(LBc, u2 = 1) + on(LBd, u2 = 1) + on(LBe, u1 = 1);
+varf vBCm([u1,u2,th],[v1,v2,ze]) = on(LBa, u1 = 1) + on(LBb, u2 = 1) + on(LBc, u2 = 1) + on(LBd, u2 = 1) + on(LBe, u1 = 1) + on(LBf, u2 = 1);
 varf vBCpist([u1,u2,th],[v1,v2,ze]) = on(LBe, u1 = 1);          // dofs of the piston edge (right, u_x); LBe=9999 unless piston mode
 real[int] pistm = vBCpist(0, Wh, tgv = 1);
 real[int] pistk(Wh.ndof); pistk = 1; pistk -= pistm;
+varf vBCpistT([u1,u2,th],[v1,v2,ze]) = on(LBf, u2 = 1);        // dofs of the shear plate (right, u_y); LBf=9999 unless shearpiston
+real[int] pistmT = vBCpistT(0, Wh, tgv = 1);
 varf vBCconf([u1,u2,th],[v1,v2,ze]) = on(LBc, u2 = 1) + on(LBd, u2 = 1);   // roller dofs (u_y on top and bottom): must be exactly 0, not frozen at the relaxed-state value
 real[int] confm = vBCconf(0, Wh, tgv = 1);
 real[int] confk(Wh.ndof); confk = 1; confk -= confm;
@@ -966,9 +973,25 @@ func real pistonAcc(real tt) {
   if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return -pistUp/pistTr*(30*s^4 - 60*s^3 + 30*s^2); }
   return 0.;
 }
+func real pistonDispU(real tt, real v) { real s; if (tt <= 0) return 0.;   // pistonDisp for plate speed v
+  if (tt < pistTr) { s = tt/pistTr; return v*pistTr*(s^6 - 3*s^5 + 2.5*s^4); }
+  if (tt < pistTr + pistTh) return v*(0.5*pistTr + (tt - pistTr));
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return v*(0.5*pistTr + pistTh + pistTr*(s - (s^6 - 3*s^5 + 2.5*s^4))); }
+  return v*(pistTr + pistTh); }
+func real pistonVelU(real tt, real v) { real s; if (tt <= 0) return 0.;
+  if (tt < pistTr) { s = tt/pistTr; return v*(6*s^5 - 15*s^4 + 10*s^3); }
+  if (tt < pistTr + pistTh) return v;
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return v*(1 - (6*s^5 - 15*s^4 + 10*s^3)); }
+  return 0.; }
+func real pistonAccU(real tt, real v) { real s; if (tt <= 0) return 0.;
+  if (tt < pistTr) { s = tt/pistTr; return v/pistTr*(30*s^4 - 60*s^3 + 30*s^2); }
+  if (tt < pistTr + pistTh) return 0.;
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return -v/pistTr*(30*s^4 - 60*s^3 + 30*s^2); }
+  return 0.; }
 func int fixBCkin(real tt) {   // V, Acc on the prescribed dofs := exact (piston: -v_p, -a_p in x; every other prescribed dof: 0)
   V = V .* mask; Acc = Acc .* mask;
   if (isP) { real[int] q = pistm; q *= -pistonVel(tt); V += q; q = pistm; q *= -pistonAcc(tt); Acc += q; }
+  if (isSP) { real[int] q = pistmT; q *= pistonVelU(tt, pistUt); V += q; q = pistmT; q *= pistonAccU(tt, pistUt); Acc += q; }
   return 0;
 }
 // KWC couple stress from element-mean phi^2 (consistent with the energy)
@@ -1507,7 +1530,7 @@ if (nstart == 0 && mpirank == 0) {
   f.precision(10);
   f << "{\n";
   f << " \"units\": {\"length\": \"um\", \"time\": \"ns\", \"stress\": \"GPa\", \"temperature\": \"K\", \"density\": \"1e3 kg/m3\", \"energy_per_thickness\": \"GPa um^2 = 1e-3 J/m\"},\n";
-  f << " \"variant\": \"" << variant << "\", \"mesh\": \"" << mfile << "\", \"j_um2\": " << jz << ", \"amp_GPa\": " << amp << ", \"load_dir\": \"" << ldir << "\",\n";
+  f << " \"variant\": \"" << variant << "\", \"mesh\": \"" << mfile << "\", \"j_um2\": " << jz << ", \"amp_GPa\": " << amp << ", \"load_dir\": \"" << ldir << "\", \"piston_up_um_ns\": " << pistUp << ", \"piston_ut_um_ns\": " << pistUt << ", \"ramp_ns\": " << pistTr << ", \"hold_ns\": " << pistTh << ",\n";
   f << " \"tend_ns\": " << tend << ", \"dt_ns\": " << dt << ", \"nrelax\": " << (isA ? nrelax : 0) << ", \"pulse_ns\": [2, 3, 2],\n";
   f << " \"mu_c\": " << muc << ", \"rho\": " << rho << ", \"C_lattice\": {\"xxxx\": " << Clxx << ", \"yyyy\": " << Clyy << ", \"xxyy\": " << Clxy << ", \"xyxy\": " << Clss << ", \"xxzz\": " << Clxz << ", \"yyzz\": " << Clyz << "},\n";
   f << " \"lattice_frame\": \"x=[110], y=[001], z=[-110]\",\n";
@@ -1562,7 +1585,8 @@ for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
   // alternating acceleration mode into a kink (dt^2/4 A) before the first iteration.
   if (predName != "none") { tv = V; tv *= dt; U += tv; }
   if (predName == "avg") { tv = Acc; tv *= 0.25*dt*dt; U += tv; }
-  if (isP && !relax) { U = U .* pistk; U = U .* confk; tv = pistm; tv *= -pistonDisp(t); U += tv; }   // prescribed piston displacement (x) on the right edge
+  if (isP && !relax && !isSP) { U = U .* pistk; U = U .* confk; tv = pistm; tv *= -pistonDisp(t); U += tv; }   // prescribed piston displacement (x) on the right edge
+  if (isSP && !relax) { U = U .* mask; tv = pistm; tv *= -pistonDisp(t); U += tv; tv = pistmT; tv *= pistonDispU(t, pistUt); U += tv; }   // shear plate: every prescribed dof set exactly (wall 0, plate -d_n, +d_t)
   u1[] = U;
   Upred = U;
   mark("predictor (Newmark average acceleration, piston displacement)"); nanV(U, "predicted displacement");

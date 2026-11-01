@@ -13,7 +13,7 @@ N=${1:-10}
 export DT=${DT:-0.01} NREF=${NREF:-20} NP=${NP:-8}
 MEM=${MEM:-24G}
 export TEND RAMP HOLD VTKEVERY TSTOP GNDPHI2 RECOV CA CD DIAG DRAGRHO VC RHOMSAT C2M RHOFCUT RHOMMIN RELAXFIX \
-       SPINMAX SPINBRANCH BCKIN PREDICTOR ONFAIL MAXITRETRY CKROLL EXACTEXP DISSIP CDSTORE SOFTMIN EOS KP K0 VOLTAN NEWTON TOLRES RESFLOOR LSMAX MAXIT NLOCAL TANGENT POLISH FDK FDQ LINSOLVER LINTOL PRECEVERY TANEVERY SLIPPRED RUNTAG SHARETAG PETSC PETSCFALL PETSCP1 MPIRUN
+       SPINMAX SPINBRANCH BCKIN PREDICTOR ANGLE ONFAIL MAXITRETRY CKROLL EXACTEXP DISSIP CDSTORE SOFTMIN EOS KP K0 VOLTAN NEWTON TOLRES RESFLOOR LSMAX MAXIT NLOCAL TANGENT POLISH FDK FDQ LINSOLVER LINTOL PRECEVERY TANEVERY SLIPPRED RUNTAG SHARETAG PETSC PETSCFALL PETSCP1 MPIRUN
 [ -s cosserat2d_mob_mpi.edp ] || { echo "missing cosserat2d_mob_mpi.edp"; exit 1; }
 [ -s out_A/A_dyn_relaxed_ck.txt ] || { echo "missing out_A/A_dyn_relaxed_ck.txt (run the variant-A relaxation first)"; exit 1; }
 mkdir -p logs
@@ -25,4 +25,4 @@ for i in $(seq 2 "$N"); do
 done
 post=$(sbatch --parsable --export=ALL --dependency=afterany:$prev run_post_piston_mob_mpi.sbatch)
 echo "post-processing array: $post (starts after $prev)"
-echo "outputs: out_pistM3v2RcV[_dt${DT}_nr${NREF}][_${RUNTAG:-}]_mpi_up<speed>ms/   (check progress: tail -1 out_*/*_log.csv)"
+echo "outputs: out_pistM3v2RcV[_dt${DT}_nr${NREF}][_${RUNTAG:-}]_mpi[_a${ANGLE:-45}]_up<speed>ms/   (check progress: tail -1 out_*/*_log.csv)"
