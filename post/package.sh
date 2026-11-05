@@ -1,8 +1,9 @@
 #!/bin/bash
-# usage: bash package.sh <animout> <dest> [<datadir> <zipname>]   (paths may be relative; they are made absolute first)
+# usage: bash package.sh <animout> <dest> [<datadir> <zipname> [<grain_dir>]]   (paths may be relative; they are made absolute first)
 set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$(cd "$1" && pwd)"; mkdir -p "$2"; DST="$(cd "$2" && pwd)"
+GR=""; [ -n "${5:-}" ] && [ -d "$5" ] && GR="$(cd "$5" && pwd)"   # optional 5th argument: grain-count output directory
 cd "$SRC"
 for k in $(ls -d */ | tr -d /); do
   zip -qr "$DST/${k}_pngs.zip" "$k/png"
@@ -20,3 +21,5 @@ done
 cp "$HERE/SMOOTHING.md" "$DST/"
 # raw data zip
 if [ -n "$3" ]; then (cd "$3" && zip -qr "$DST/$4" . -x '*.out'); fi
+# grain count / boundary misorientation history (post/grain_post.py)
+if [ -n "$GR" ]; then rm -rf "$DST/grains"; cp -r "$GR" "$DST/grains"; fi

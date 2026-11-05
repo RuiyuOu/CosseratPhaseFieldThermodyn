@@ -47,9 +47,11 @@ def load(vtu, mesh):
     g = lambda k: m.cell_data[k][ti].ravel()
     d = dict(u=m.point_data['u'][:, :2], v=m.point_data['v'][:, :2],
              thdot=m.point_data['theta_dot'].ravel(), dth=m.point_data['dtheta_deg'].ravel(),
-             T=m.point_data['T'].ravel(), phi=m.point_data['phi'].ravel())
-    for k in ['sig_11','sig_22','sig_12','sig_21','Fp_11','Fp_12','Fp_21','Fp_22','rhoG','slip_path_eff','slip_path_phys','rhoS','wstar','D_rate','J','p1','p2','p3','Label']:
+             T=m.point_data['T'].ravel(), phi=m.point_data['phi'].ravel(), thl=m.point_data['theta_lattice_deg'].ravel())
+    for k in ['sig_33','sig_11','sig_22','sig_12','sig_21','Fp_11','Fp_12','Fp_21','Fp_22','rhoG','slip_path_eff','slip_path_phys','rhoS','wstar','D_rate','J','p1','p2','p3','Label']:
         d[k] = g(k)
+    for k in ['rho_mob', 'eta_drag']:   # cosserat2d_mob.edp only (mobile density used in the drag, effective low-stress drag)
+        if k in m.cell_data: d[k] = g(k)
     return d
 
 def derived(mesh, d, ell=0.04):
@@ -59,6 +61,7 @@ def derived(mesh, d, ell=0.04):
     o['curlv'] = mesh.Gx @ vy - mesh.Gy @ vx          # 1/ns
     o['press'] = -0.5*(d['sig_11'] + d['sig_22'])*1e3   # MPa (sigma in GPa)
     o['tauS'] = 0.5*(d['sig_12'] + d['sig_21'])*1e3     # MPa
+    o['sigF'] = np.sqrt(d['sig_11']**2 + d['sig_22']**2 + d['sig_12']**2 + d['sig_21']**2 + d['sig_33']**2)*1e3   # Frobenius norm, MPa
     o['umag'] = np.hypot(d['u'][:, 0], d['u'][:, 1])*1e3   # nm
     o['dT'] = d['T'] - 300.0
     # GND from curl Fp: (curl Fp)_{i} = d_1 Fp_{i2} - d_2 Fp_{i1}
@@ -72,6 +75,7 @@ def derived(mesh, d, ell=0.04):
     o['gnd_curl_raw'] = np.hypot(mesh.Gx @ F12r - mesh.Gy @ F11r, mesh.Gx @ F22r - mesh.Gy @ F21r)/B_UM*1e12
     o['gnd_solver'] = d['rhoG']*1e12
     for k in ('slip_path_eff','slip_path_phys','p1','p2','p3'): o[k] = d[k]
+    o['thl'] = d['thl']
     return o
 
 def frame_list(dirpath, base='A_dyn'):

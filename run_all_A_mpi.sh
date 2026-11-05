@@ -2,6 +2,8 @@
 # MPI/PETSc version of run_all_A.sh: full variant-A piston ladder (u_p = 25 50 100 150 250 400 m/s) with cosserat2d_mob_mpi.edp,
 # solver-default time step DT=0.01 ns and NREF=20 (NREF is unused by full Newton), followed by the post-processing array.
 #   NP ranks per level (default 8; sbatch -n is set to NP), MEM per job (default 24G); tags get the suffix _mpi (serial runs untouched).
+#   ARRAY (default 0-5): which ladder levels (0-5 = 25 50 100 150 250 400 m/s), e.g. ARRAY=5 for 400 m/s only (runs and post-processing).
+#   CODE (stable | exp), MUCDUAL, DUALR, KWCEDIFF, KWCFIELD, KWCONEWAY, ..., PETSCDUAL: see run_piston_mob_mpi.sh (tag suffixes _exp _du _dr _ne _kf _ow).
 #   physics defaults: DRAGRHO=3 VC=2 RECOV=2 CD=100 EOS=vinet VOLTAN=1 DISSIP=1 CDSTORE=1 RELAXFIX=1 ONFAIL=retry CKROLL=20
 #   outputs: out_pistM3v2RcV[_<RUNTAG>]_mpi_up<speed>ms/   animations: deliver_pistM3v2RcV[_<RUNTAG>]_mpi_up<speed>ms/
 # usage: bash run_all_A_mpi.sh [N_chained_arrays=10]   e.g.  RUNTAG=gm NP=8 bash run_all_A_mpi.sh
@@ -12,17 +14,18 @@ cd "$(dirname "$0")"
 N=${1:-10}
 export DT=${DT:-0.01} NREF=${NREF:-20} NP=${NP:-8}
 MEM=${MEM:-24G}
-export TEND RAMP HOLD VTKEVERY TSTOP GNDPHI2 RECOV CA CD DIAG DRAGRHO VC RHOMSAT C2M RHOFCUT RHOMMIN RELAXFIX \
-       SPINMAX SPINBRANCH BCKIN PREDICTOR ANGLE ONFAIL MAXITRETRY CKROLL EXACTEXP DISSIP CDSTORE SOFTMIN EOS KP K0 VOLTAN NEWTON TOLRES RESFLOOR LSMAX MAXIT NLOCAL TANGENT POLISH FDK FDQ LINSOLVER LINTOL PRECEVERY TANEVERY SLIPPRED RUNTAG SHARETAG PETSC PETSCFALL PETSCP1 MPIRUN
-[ -s cosserat2d_mob_mpi.edp ] || { echo "missing cosserat2d_mob_mpi.edp"; exit 1; }
+export TEND RAMP HOLD VTKEVERY TSTOP GND GNDPHI2 RECOV CA CD DIAG DRAGRHO VC RHOMSAT C2M RHOFCUT RHOMMIN RELAXFIX \
+       SPINMAX SPINBRANCH BCKIN PREDICTOR ANGLE SYMFOLD SYMN GNDCURL CODE MUCDUAL DUALR KWCEDIFF KWCE KWCREG KWCGAM KWCFIELD KWCONEWAY KWCP KWCKAP KWCTAU KWCIT PETSCDUAL ONFAIL MAXITRETRY CKROLL EXACTEXP DISSIP CDSTORE SOFTMIN EOS KP K0 VOLTAN NEWTON TOLRES RESFLOOR LSMAX MAXIT NLOCAL TANGENT POLISH FDK FDQ LINSOLVER LINTOL PRECEVERY TANEVERY SLIPPRED ETAPHIMIN QPHI ETAPHI ETASTAR RUNTAG SHARETAG PETSC PETSCFALL PETSCP1 MPIRUN
+ARRAY=${ARRAY:-0-5}
+[ -s cosserat2d_mob_${CODE:-stable}_mpi.edp ] || { echo "missing cosserat2d_mob_${CODE:-stable}_mpi.edp (python3 mpi/make_mpi.py cosserat2d_mob_${CODE:-stable}.edp cosserat2d_mob_${CODE:-stable}_mpi.edp)"; exit 1; }
 [ -s out_A/A_dyn_relaxed_ck.txt ] || { echo "missing out_A/A_dyn_relaxed_ck.txt (run the variant-A relaxation first)"; exit 1; }
 mkdir -p logs
-prev=$(sbatch --parsable --export=ALL -n $NP --mem=$MEM run_piston_mob_mpi.sbatch)
+prev=$(sbatch --parsable --export=ALL --array=$ARRAY -n $NP --mem=$MEM run_piston_mob_mpi.sbatch)
 echo "array 1/$N: $prev"
 for i in $(seq 2 "$N"); do
-  prev=$(sbatch --parsable --export=ALL --dependency=afterany:$prev -n $NP --mem=$MEM run_piston_mob_mpi.sbatch)
+  prev=$(sbatch --parsable --export=ALL --array=$ARRAY --dependency=afterany:$prev -n $NP --mem=$MEM run_piston_mob_mpi.sbatch)
   echo "array $i/$N: $prev"
 done
-post=$(sbatch --parsable --export=ALL --dependency=afterany:$prev run_post_piston_mob_mpi.sbatch)
+post=$(sbatch --parsable --export=ALL --array=$ARRAY --dependency=afterany:$prev run_post_piston_mob_mpi.sbatch)
 echo "post-processing array: $post (starts after $prev)"
 echo "outputs: out_pistM3v2RcV[_dt${DT}_nr${NREF}][_${RUNTAG:-}]_mpi[_a${ANGLE:-45}]_up<speed>ms/   (check progress: tail -1 out_*/*_log.csv)"

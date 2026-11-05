@@ -1,1 +1,3 @@
 task 4: piston u_p = 250 m/s, tend 30 ns
+ENDED at the temperature limit:
+stopped at step 1160 t=10.6 ns: max T = 4294.77 K exceeded tstop = 1400 K (or NaN)
