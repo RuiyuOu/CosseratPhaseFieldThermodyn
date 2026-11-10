@@ -1,9 +1,10 @@
 #!/bin/bash
-# usage: bash package.sh <animout> <dest> [<datadir> <zipname> [<grain_dir>]]   (paths may be relative; they are made absolute first)
+# usage: bash package.sh <animout> <dest> [<datadir> <zipname> [<grain_dir> [<tau_dir>]]]   (paths may be relative; they are made absolute first)
 set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$(cd "$1" && pwd)"; mkdir -p "$2"; DST="$(cd "$2" && pwd)"
 GR=""; [ -n "${5:-}" ] && [ -d "$5" ] && GR="$(cd "$5" && pwd)"   # optional 5th argument: grain-count output directory
+TA=""; [ -n "${6:-}" ] && [ -d "$6" ] && TA="$(cd "$6" && pwd)"   # optional 6th argument: tau_stats.py output directory
 cd "$SRC"
 for k in $(ls -d */ | tr -d /); do
   zip -qr "$DST/${k}_pngs.zip" "$k/png"
@@ -23,3 +24,5 @@ cp "$HERE/SMOOTHING.md" "$DST/"
 if [ -n "$3" ]; then (cd "$3" && zip -qr "$DST/$4" . -x '*.out'); fi
 # grain count / boundary misorientation history (post/grain_post.py)
 if [ -n "$GR" ]; then rm -rf "$DST/grains"; cp -r "$GR" "$DST/grains"; fi
+# tau_1..3 / tau_c / T / pressure / mismatch-beta statistics (post/tau_stats.py)
+if [ -n "$TA" ]; then rm -rf "$DST/tau"; cp -r "$TA" "$DST/tau"; fi

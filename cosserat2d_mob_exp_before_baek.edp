@@ -1,0 +1,2131 @@
+// =====================================================================
+// cosserat2d.edp  --  dynamic, finite-deformation, plane-strain Cosserat crystal
+// plasticity on a [1-10] Rice planar-triple-slip polycrystal.
+// Kinematics: F = I + grad u, F = R(theta) Ubar Fp, Fp(0) = I (reference lattice = grain angle),
+//   St Venant-Kirchhoff on Ebar = (Ubar^T Ubar - I)/2 with the grain-rotated cubic C, plus 2 mu_c a^2,
+//   a = (Ubar_21 - Ubar_12)/2.  Fp_{n+1} = exp(dLp) Fp_n with dLp = sum dgamma s(x)n + dw* What.
+// Discretization of the elastic energy: exact pointwise quadratic part (P2/P1) + element-mean
+//   finite-strain correction  A_e [psi(Fbar_e, thbar_e, Fp_e) - psi_lin(Fbar_e, thbar_e, Fp_e)]
+//   (a stabilized one-point evaluation of the geometric nonlinearity; exact for element-constant F).
+// GND/recovery variant of the HPC solver (2026-10-29): adds -gndphi2 (0 = no phi^2 weight on rho_G), -recov (sweeping recovery: 0 original |dphi|, 1 Heaviside, 2 Ask 2019 Heaviside x tanh), -ca, -diag, and fixes the logged max_abs_dtheta_deg column.
+// Variants:  F = Forest-type plastic curvature (edge law) + GND hardening
+//            A = Ask-type KWC phase field + grain-boundary plastic spin
+// Units: um, ns, GPa, K  (density 1e3 kg/m3; 1 Pa s = 1 GPa ns)
+// Integrator: Newmark average acceleration (generalized-alpha rho_inf = 1),
+//   modified Newton with a constant elastic tangent ("initial stress"),
+//   implicit (backward-Euler) local update of slip / plastic curvature / GB spin,
+//   staggered implicit heat equation and phase-field equation.
+// No thermal expansion; energetic coefficients frozen at T0.
+// =====================================================================
+load "iovtk"
+load "IncompleteCholesky"   // iLU / iluSolve for the GMRES preconditioner (-linsolver gmres)
+
+// ---------------- command-line arguments -----------------------------
+func string arg(string key, string def) {
+  string r = def;
+  for (int i = 0; i < ARGV.n - 1; i++) if (ARGV[i] == key) r = ARGV[i+1];
+  return r;
+}
+string variant = arg("-variant", "F");
+real jz      = atof(arg("-j", "1e-2"));      // um^2   (1e-14 m^2 = 1e-2 um^2)
+real amp     = atof(arg("-amp", "0.06"));    // GPa nominal traction
+string ldir  = arg("-dir", "shear");         // shear | comp | combo | piston (confined piston: wall u_x=0 left, u_y=0 top/bottom, right edge u_x=-d(t))
+real ampS    = atof(arg("-shear", "0"));    // combo: additional shear traction (GPa, +y) on the loaded edge, with compression -amp in x
+real tend    = atof(arg("-tend", "15"));     // ns
+real pistUp  = atof(arg("-pistonup", "0.25"));   // piston: particle velocity u_p in um/ns (= 1000 m/s)
+real pistUt  = atof(arg("-pistonut", "0"));      // shearpiston: tangential (+y) plate velocity in um/ns; same ramp/hold profile as -pistonup
+real pistTr  = atof(arg("-ptr", "0.5"));         // piston: ramp time (ns), smooth quintic up and down
+real pistTh  = atof(arg("-pth", "2.0"));         // piston: hold time at u_p (ns); total piston travel = u_p (tr + th)
+real dt      = atof(arg("-dt", "0.01"));     // ns
+real muc     = atof(arg("-muc", "75.4"));    // GPa
+// -mucdual 2 (2026-11-02, 0 = old penalty; after Baek et al. IJNME 2022): rotational compatibility a = skew(Ubar^e) = 0 imposed
+//   exactly by an element (P0) multiplier lambda (the skew stress, GPa) on the element-mean constraint, augmented Lagrangian
+//   2 lambda a + 2 r a^2 with r = -muc (now only the AL / least-squares stabilisation; the P2-P0 pairing is Stokes-stable since
+//   rot u = div u^perp).  Uzawa: lambda += 2 r a after each converged Newton solve; -dualit k: k-1 extra re-solves per step
+//   (k = 1: lagged, one update per step, constraint error ~ the per-step increment of the skew stress / 2r).
+//   -mucdual 1 (proper mixed method, 2026-11-02): lambda (P0, skew stress) is a global unknown next to (u P2, theta P1); the
+//   element-mean constraint 2a = 0 enters the Newton system as [[K, B_l], [G, C]] with the exact consistent tangent (the local
+//   slip/spin response to lambda included).  Inf-sup: rot u = div u^perp, so (P2, P0) inherits the Stokes P2-P0 stability.
+//   The Cosserat penalty becomes the optional augmented-Lagrangian stabilisation r = -dualr (GPa, default 0 = pure multiplier):
+//   muc := r everywhere.  Needs -tangent consistent -newton full -linsolver umfpack.
+//   -mucdual 2: the Uzawa / iterated-penalty variant (r = -muc, -dualit k re-solves per step).
+int mucDual = atoi(arg("-mucdual", "0")), dualIt = atoi(arg("-dualit", "1"));
+real dualR = atof(arg("-dualr", "0")), dualSc = 48.;   // dualSc: scaling of the constraint rows (shear modulus, GPa)
+real mucIn = muc; if (mucDual == 1) muc = dualR;
+string out   = arg("-out", "run_" + variant);
+int nrelax   = atoi(arg("-nrelax", "100"));  // A: zero-load interface relaxation steps
+int vtkon    = atoi(arg("-vtk", "1"));
+int vtkevery = atoi(arg("-vtkevery", "0"));     // extra snapshots every N loaded steps (0 = only at 2/5/7/10 ns and the end)
+int maxit    = atoi(arg("-maxit", "40"));
+int verbose  = atoi(arg("-verbose", "0"));
+real tolU    = atof(arg("-tol", "1e-7"));
+int stepsmax = atoi(arg("-stepsmax", "100000000"));
+real tscale  = atof(arg("-tscale", "1"));
+string restart = arg("-restart", "");       // checkpoint file to resume from
+real tstop = atof(arg("-tstop", "1e30"));   // K: stop gracefully (frame + checkpoint + _TSTOP.txt) when max T exceeds this (e.g. 1400 K ~ Cu melting) or T is NaN
+real walllimit = atof(arg("-walllimit", "1e30"));   // s: checkpoint and stop after this wall time
+int ckevery  = atoi(arg("-ckevery", "100"));     // debug: compress the load envelope in time
+bool isA = (variant == "A");
+
+// ---------------- material parameters --------------------------------
+real rho = 8.96;                  // GPa ns^2 / um^2
+real Clxx = 220.3, Clyy = 168.4, Clxy = 121.4, Clss = 75.4;   // lattice frame x=[110], y=[001]
+real Clxz = 69.5, Clyz = 121.4;                                 // for sigma33 output
+real mu = 48., b = 2.556e-4;      // GPa, um
+real tau0 = 0.001, lamT = 0.3;    // GPa
+real rho0 = 10.;                  // um^-2  (1e13 m^-2)
+real g0 = 1e-6, mexp = 50.;       // 1/ns, rate exponent
+real B0 = 2e-5;                   // GPa ns (2e-5 Pa s) at T0
+real Kkmt = 0.05, dkmt = 5e-4;    // KMT storage, d in um
+real chi = 1.0;
+real T0 = 300., alphaMu = 3.8e-4;
+real rhoC = 3.45e-3, kth = 4e-4;  // GPa/K, GPa um^2/(ns K)
+real lc = 0.05, Acurv = mu*lc*lc, lmode = 0.05;   // F: curvature modulus (GPa um^2), mode length
+// A: KWC, Lobkovsky-Warren logarithmic coupling (Read-Shockley):
+//   psi_K = f0 [ (1-phi)^2/2 + a^2 |grad phi|^2/2 + s g(phi) N(grad theta_t) + eps^2 |grad theta_t|^2/2 ]
+//   g = -2[phi + ln(1-phi)],  h = 1,  N = sqrt(|grad theta_t|^2 + delta^2) - delta
+real f0 = atof(arg("-f0", "0.0115")), aK = atof(arg("-kwca", "0.062")), sK = atof(arg("-kwcs", "0.150")),
+     eK = atof(arg("-kwce", "0.200")), dlt = atof(arg("-kwcd", "0.005"));   // [defaults set by calib/fit2.py]
+// -kwcediff 0 (2026-11-02; 1 = old): drop the orientation-gradient ("diffusion") term eps^2 |grad theta|^2/2 from the KWC energy,
+//   couple stress, tangent and phase-field/recovery uses (same as -kwce 0; the requested -kwce value is still written to the meta file)
+int kwcEdiff = atoi(arg("-kwcediff", "1")); real eKin = eK; if (!kwcEdiff) eK = 0;
+// -kwcreg 1 (2026-11-02; 0 = old): regularisation of the singular |grad theta| term after Kobayashi & Giga (1998, Eq. 3.15-3.18):
+//   N(q) = (1/gam) ln cosh(gam q)  (flux tanh(gam q) grad theta/q, diffusivity <= gam)  instead of  N(q) = sqrt(q^2 + delta^2) - delta
+//   (diffusivity <= 1/delta).  -kwcgam gam (rad/um)^-1 ... (um/rad), default 1/delta.  ln cosh x = x + ln(1 + e^{-2x}) - ln 2 (no overflow).
+int kwcReg = atoi(arg("-kwcreg", "0")); real gK = atof(arg("-kwcgam", "0")); if (gK <= 0) gK = 1./dlt;
+real wSq = (kwcReg == 1) ? 0. : 1., wKG = 1. - wSq;
+// N(q) from q^2 (exact old expression when -kwcreg 0)
+func real kgLnCosh(real x) { real ax = abs(x); return ax + log(1. + exp(-2*ax)) - log(2.); }   // (a function: inside the time loop "log" is the log-file stream)
+macro NKWC(kqq) (wSq*(sqrt((kqq) + dlt^2) - dlt) + wKG*kgLnCosh(gK*sqrt(kqq))/gK) //
+// N'(q)/q, d/dq(N'(q)/q)/q  for KG (arrays, elementwise; series near q = 0)
+func int kgFac(real[int] & q, real[int] & fq, real[int] & cq) {
+  for (int i = 0; i < q.n; i++) {
+    real x = gK*q[i];
+    if (x < 1e-3) { fq[i] = gK*(1. - x*x/3.); cq[i] = gK^3*(-2./3. + 8.*x*x/15.); }
+    else { real t = tanh(x), sc = 1. - t*t; fq[i] = t/q[i]; cq[i] = (gK*sc - t/q[i])/(q[i]*q[i]); }
+  }
+  return 0;
+}
+real phimax = 1. - 1e-7;     // cap: g diverges at phi = 1
+real etaPhi0 = 0.1, Qphi = 100e3, Rgas = 8.314;   // GPa ns, J/mol
+real etaStar0 = atof(arg("-etastar", "1e-3")), CD = atof(arg("-cd", "10"));   // C_D: sweeping-recovery constant (original 10; Ask et al. 2019 Table 3: 100)
+real etaPhiRelax = 1e-3;
+// ---- elastic law (2026-10-30): -eos svk (old: SVK on Ebar) | murnaghan | vinet ----
+//  vol/dev split: psi_e = W(J) + 1/2 Et:C:Et (3D cubic C, plane strain) + 2 muc a^2,  Et = (J^{-2/3} Cbar - I)/2 (isochoric Green strain), J = det Ubar
+//  Murnaghan: P = K0/K' (J^-K' - 1);  Vinet: P = 3 K0 (1-x)/x^2 exp(eta (1-x)), x = J^(1/3), eta = 1.5 (K'-1).  Identical to SVK/linear at small strain.
+string eosName = arg("-eos", "svk");
+int eosMode = (eosName == "vinet") ? 2 : ((eosName == "murnaghan") ? 1 : 0);
+real K0eos = atof(arg("-k0", "0")); if (K0eos <= 0) K0eos = (Clxx + Clxy + Clxz)/3.;   // cubic bulk modulus (C11 + 2 C12)/3 = 137.1 GPa
+real Kpeos = atof(arg("-kp", "5.0"));                                                  // K' (Cu: ~4s-1 with Hugoniot slope s = 1.49)
+int volTan = atoi(arg("-voltan", "1"));                                                // add (K(J) - K0)+ (div v)(div w) to the tangent at refresh
+// ---- mobile dislocation density in the drag (Orowan) part of the slip law (all default to the original) ----
+//  Drag-limited Orowan: gdot = rho_m b v,  v = b tau / B(T)  =>  eta_d = B0 (T/T0) / (b^2 rho_m)
+//  -dragrho 0: rho_m = rhoS + rhoG                      (original: every dislocation is mobile)
+//           1: rho_m = rhoS                             (GNDs immobile: they harden but do not lower the drag)
+//           2: rho_m = c_MR (T/T0) sqrt(rho_P rho_F)    (Ma & Roters 2004 Eq. 13, Ma-Roters-Raabe 2006 Eq. 13;
+//              c_MR = 2 kB T0/(c1 c2 c3 mu b^3); one scalar density => rho_P = rho_F = rhoS + rhoG)
+//           3: rho_m evolved (Kubin-Estrin type mobile/forest split):
+//              d rho_M/d gamma = C2 [ rho_Msat (1 - sqrt(rho_F/rho_Fcut)) - rho_M ],  rho_F = rhoS + rhoG,
+//              used as min(rho_M, rho_F) (mobile <= total); integrated backward Euler (unconditionally stable)
+//  -vc v (um/ns = km/s), 0 = off: relativistic drag  B_eff = B sqrt(1 + (b tau/(v_c B))^2)   (Blaschke & Luscher 2021 Eq. 3.4)
+//              => |gdot| <= rho_m b v_c ; Cu transverse sound speed limit ~2.2 (screw) / 1.6 (edge) km/s
+int dragRho = atoi(arg("-dragrho", "0"));
+// ---- robustness (2026-10-30) ----
+int exactExp = atoi(arg("-exactexp", "1"));     // 1: exact exponential of the plastic increment (det Fp = 1 for any increment); 0: old q^4 series
+real spinMax = atof(arg("-spinmax", "0"));      // >0: bound |dw*| per step (rad), like the drag bound on slip; 0 = off (default)
+// -spinbranch b (rad, 0 = off = old behaviour): keep the GB-spin increment on the principal root, |dw*| <= b per step, in the
+//   spin update AND in the coupled polish.  With the exact exponential the energy is pi-periodic in w* (Ubar -> -Ubar leaves
+//   Ubar^T Ubar and a^2 unchanged), so dw* = k tau*(dw*) has spurious roots at ~n pi wherever k = dt(1-phi)^2/(2 eta*0) is large
+//   (GB cores); the local Newton can land on one (2026-10-31: w* 0.001 -> 71.8 rad in one step, T -> 6e5 K, 50 m/s at 3.96 ns).
+//   b = pi/4 never binds a physical increment (|dw*| ~ 1e-3 rad per step) but excludes every spurious root.
+real spinBranch = atof(arg("-spinbranch", "0"));
+real spinCap = spinMax; if (spinBranch > 0 && (spinCap <= 0 || spinBranch < spinCap)) spinCap = spinBranch;
+string onFail = arg("-onfail", "retry");        // unconverged global iteration: retry = restore, refresh tangent, re-solve (up to -maxitretry), then stop cleanly; stop = stop at once; commit = old behaviour
+int maxitRetry = atoi(arg("-maxitretry", "80"));
+int ckRoll = atoi(arg("-ckroll", "0"));
+// ---- thermodynamic consistency (2026-10-30, see clausius_duhem.pdf) ----
+int dissImp = atoi(arg("-dissip", "0"));        // 1: heat source from the implicit slip dissipation tau_{n+1} dgamma (>= 0, backward Euler); 0: midpoint (old; exact first-law audit, not sign-definite)
+real cdStore = atof(arg("-cdstore", "0"));      // >0: cap KMT storage so that Z drho_store <= cdstore * sum|tau_{n+1} dgamma| (cdstore = 1: Clausius-Duhem limit); 0 = off
+real softMin = atof(arg("-softmin", "0.01"));   // lower bound of the thermal softening factor 1 - alpha_mu (T - T0) (keeps tau_c > 0 above ~2900 K)         // >0: also write rolling checkpoints <out>_ckroll{0,1}.txt every ckroll steps (pre-crash replay)
+real vcrel = atof(arg("-vc", "0"));
+real kB = 1.380649e-14;                       // GPa um^3/K  (1 GPa um^3 = 1e-9 J)
+real c1MR = atof(arg("-c1mr", "0.1")), c2MR = atof(arg("-c2mr", "2.0")), c3MR = atof(arg("-c3mr", "1.0"));   // Ma-Roters-Raabe 2006 Table 1
+real rhoMsat = atof(arg("-rhomsat", "100")), C2M = atof(arg("-c2m", "10")), rhoFcut = atof(arg("-rhofcut", "1e4")), rhoMmin = atof(arg("-rhommin", "1"));   // um^-2
+real fs1 = sqrt(3.), fs2 = 2./sqrt(3.), fs3 = 2./sqrt(3.);
+real aR = atan(sqrt(2.));
+real[int] slx = [1., cos(aR), cos(aR)], sly = [0., sin(aR), -sin(aR)];   // lattice slip directions
+real[int] fsa = [fs1, fs2, fs3];
+
+// ---------------- mesh and grain data --------------------------------
+string mfile = "mesh_F.msh"; if (isA) mfile = "mesh_A.msh";
+mesh Th = readmesh(mfile);
+int nt = Th.nt;
+real[int] thg(8);
+{ ifstream f("theta_rice_rad.txt"); for (int i = 0; i < 8; i++) f >> thg(i); }
+
+fespace Wh(Th, [P2, P2, P1]);
+fespace Vh1(Th, P1);
+fespace Ph(Th, P0);
+Wh [u1, u2, th], [v1, v2, ze];
+Vh1 T = T0, Tn = T0, phi = 1., phin = 1., th0s = 0., xi, thR = 0.;
+if (isA) { phi = 0.999; phin = phi; }   // log coupling: start just below phi = 1 (g diverges there)   // thR: GND reference rotation (relaxed state)
+Ph thg0;
+Ph GSX, GSY;   // element orientation gradient used by the KWC terms (see -symfold, symGrad)
+for (int k = 0; k < nt; k++) thg0[][k] = thg(Th[k].label - 1);
+
+// rotated stiffness and Schmid data per element (arrays)
+real[int] C11(nt), C22(nt), C12(nt), C16(nt), C26(nt), C66(nt), B11(nt), B22(nt), B12(nt);   // B_ij = C_ij33 (element frame)
+real[int] P11a(nt), P22a(nt), P12a(nt), P11b(nt), P22b(nt), P12b(nt), P11c(nt), P22c(nt), P12c(nt);
+real[int] s1x(nt), s1y(nt), s2x(nt), s2y(nt), s3x(nt), s3y(nt);
+real[int] G11(nt), G22(nt), G33(nt), G12(nt), G13(nt), G23(nt);
+real[int] K11(nt), K22(nt), K33(nt), K12(nt), K13(nt), K23(nt);   // curvature-mode coupling (F)
+{
+  real[int] Cl(16); Cl = 0;
+  // index i*8+j*4+k*2+l, 0=x,1=y
+  Cl[0] = Clxx; Cl[15] = Clyy; Cl[3] = Clxy; Cl[12] = Clxy;
+  Cl[5] = Clss; Cl[6] = Clss; Cl[9] = Clss; Cl[10] = Clss;
+  real[int,int] Cg(8, 6), Sg(8, 6), Pg(8, 9), Gg(8, 6), Kg(8, 6);
+  for (int g = 0; g < 8; g++) {
+    real c = cos(thg(g)), s = sin(thg(g));
+    real[int] R = [c, -s, s, c];   // R[i*2+p]
+    real[int] Cr(16); Cr = 0;
+    for (int i=0;i<2;i++) for (int j=0;j<2;j++) for (int k=0;k<2;k++) for (int l=0;l<2;l++) {
+      real sum = 0;
+      for (int p=0;p<2;p++) for (int q=0;q<2;q++) for (int r=0;r<2;r++) for (int t=0;t<2;t++)
+        sum += R[i*2+p]*R[j*2+q]*R[k*2+r]*R[l*2+t]*Cl[p*8+q*4+r*2+t];
+      Cr[i*8+j*4+k*2+l] = sum;
+    }
+    Cg(g,0)=Cr[0]; Cg(g,1)=Cr[15]; Cg(g,2)=Cr[3]; Cg(g,3)=Cr[1]; Cg(g,4)=Cr[13]; Cg(g,5)=Cr[5];
+    real[int] PP(9);
+    for (int a = 0; a < 3; a++) {
+      real sx = c*slx[a] - s*sly[a], sy = s*slx[a] + c*sly[a];
+      real nx = -sy, ny = sx;
+      Sg(g, 2*a) = sx; Sg(g, 2*a+1) = sy;
+      PP[3*a] = sx*nx; PP[3*a+1] = sy*ny; PP[3*a+2] = 0.5*(sx*ny + sy*nx);
+    }
+    for (int a = 0; a < 9; a++) Pg(g, a) = PP[a];
+    // G_ab = P_a : C : P_b + muc
+    real[int] GG(9), KK(9);
+    for (int a = 0; a < 3; a++) for (int bb = 0; bb < 3; bb++) {
+      real e11 = PP[3*bb], e22 = PP[3*bb+1], e12 = PP[3*bb+2];
+      real s11 = Cg(g,0)*e11 + Cg(g,2)*e22 + 2*Cg(g,3)*e12;
+      real s22 = Cg(g,2)*e11 + Cg(g,1)*e22 + 2*Cg(g,4)*e12;
+      real s12 = Cg(g,3)*e11 + Cg(g,4)*e22 + 2*Cg(g,5)*e12;
+      GG[3*a+bb] = s11*PP[3*a] + s22*PP[3*a+1] + 2*s12*PP[3*a+2] + muc;
+      KK[3*a+bb] = Acurv/(lmode*lmode) * (Sg(g,2*a)*Sg(g,2*bb) + Sg(g,2*a+1)*Sg(g,2*bb+1));
+    }
+    Gg(g,0)=GG[0]; Gg(g,1)=GG[4]; Gg(g,2)=GG[8]; Gg(g,3)=GG[1]; Gg(g,4)=GG[2]; Gg(g,5)=GG[5];
+    Kg(g,0)=KK[0]; Kg(g,1)=KK[4]; Kg(g,2)=KK[8]; Kg(g,3)=KK[1]; Kg(g,4)=KK[2]; Kg(g,5)=KK[5];
+  }
+  for (int k = 0; k < nt; k++) {
+    int g = Th[k].label - 1;
+    C11[k]=Cg(g,0); C22[k]=Cg(g,1); C12[k]=Cg(g,2); C16[k]=Cg(g,3); C26[k]=Cg(g,4); C66[k]=Cg(g,5);
+    { real cg = cos(thg(g)), sg = sin(thg(g)); B11[k] = Clxz*cg*cg + Clyz*sg*sg; B22[k] = Clxz*sg*sg + Clyz*cg*cg; B12[k] = (Clxz - Clyz)*cg*sg; }
+    P11a[k]=Pg(g,0); P22a[k]=Pg(g,1); P12a[k]=Pg(g,2);
+    P11b[k]=Pg(g,3); P22b[k]=Pg(g,4); P12b[k]=Pg(g,5);
+    P11c[k]=Pg(g,6); P22c[k]=Pg(g,7); P12c[k]=Pg(g,8);
+    s1x[k]=Sg(g,0); s1y[k]=Sg(g,1); s2x[k]=Sg(g,2); s2y[k]=Sg(g,3); s3x[k]=Sg(g,4); s3y[k]=Sg(g,5);
+    G11[k]=Gg(g,0); G22[k]=Gg(g,1); G33[k]=Gg(g,2); G12[k]=Gg(g,3); G13[k]=Gg(g,4); G23[k]=Gg(g,5);
+    K11[k]=Kg(g,0); K22[k]=Kg(g,1); K33[k]=Kg(g,2); K12[k]=Kg(g,3); K13[k]=Kg(g,4); K23[k]=Kg(g,5);
+  }
+}
+Ph c11, c22, c12, c16, c26, c66;
+c11[] = C11; c22[] = C22; c12[] = C12; c16[] = C16; c26[] = C26; c66[] = C66;
+
+// ---------------- history (P0 arrays) ---------------------------------
+real[int] pa(nt), pb(nt), pc(nt), dpa(nt), dpb(nt), dpc(nt);
+real[int] pathE(nt), pathP(nt), Drate(nt); pathE = 0; pathP = 0; Drate = 0;   // slip path (effective, physical) and last dissipation rate
+real[int] rhoS(nt), rhoG(nt), kp1(nt), kp2(nt), dva(nt), dvb(nt), dvc(nt), wst(nt), dwst(nt);
+pa = 0; pb = 0; pc = 0; dpa = 0; dpb = 0; dpc = 0; rhoS = rho0; rhoG = 0;
+real[int] rhoM(nt), rhoMob(nt), gcrit(nt); rhoM = rho0; rhoMob = rho0; gcrit = 1e30;   // evolved mobile density (mode 3), rho_m used in the drag, rho_m b v_c
+kp1 = 0; kp2 = 0; dva = 0; dvb = 0; dvc = 0; wst = 0; dwst = 0;
+Ph hp11, hp22, hp12, omp, kq1, kq2, Ht;   // plastic fields used in assembly
+Ph E11, E22, E12, WU, TH, GT1, GT2, PHc, Tc;   // centroid kinematics / state
+Ph Hy1, Hx2;                                    // centroid du1/dy, du2/dx (with E11 = du1/dx, E22 = du2/dy)
+// finite-deformation plastic state: committed Fp (2x2, global reference-lattice frame) and trial Fp
+real[int] fp11(nt), fp12(nt), fp21(nt), fp22(nt), tf11(nt), tf12(nt), tf21(nt), tf22(nt);
+fp11 = 1; fp12 = 0; fp21 = 0; fp22 = 1; tf11 = 1; tf12 = 0; tf21 = 0; tf22 = 1;
+// s (x) n per system (n = s rotated by +90 deg)
+real[int] A11a(nt), A12a(nt), A21a(nt), A22a(nt), A11b(nt), A12b(nt), A21b(nt), A22b(nt), A11c(nt), A12c(nt), A21c(nt), A22c(nt);
+A11a = s1x .* s1y; A11a *= -1; A12a = s1x .* s1x; A21a = s1y .* s1y; A21a *= -1; A22a = s1x .* s1y;
+A11b = s2x .* s2y; A11b *= -1; A12b = s2x .* s2x; A21b = s2y .* s2y; A21b *= -1; A22b = s2x .* s2y;
+A11c = s3x .* s3y; A11c *= -1; A12c = s3x .* s3x; A21c = s3y .* s3y; A21c *= -1; A22c = s3x .* s3y;
+
+// ---------------- A: smooth initial orientation field -----------------
+// -symfold 1 (2026-11-01; 0 = old): crystal-symmetry-reduced orientation for the KWC terms.  A second orientation field
+//   theta_s = theta0sym + theta (theta0sym from the smoothed n-fold order parameter, n = -symn, period p = 2 pi/n) is used by
+//   every KWC term (energy, couple stress, KWC tangent, phase-field driving force, Ask recovery factor); its element gradient
+//   takes nodal differences modulo p (minimal-gradient lift), so a jump by a symmetry element and the -180/0 branch cut cost
+//   nothing.  Inertia, Cosserat coupling, elasticity, slip and the GND keep the original theta.  Output: theta_sym_deg in [-p, 0).
+// -symfold 2: complex n-fold order parameter z = exp(i n theta_s) at the nodes (P1); the KWC terms use q = |grad z_h|/n
+//   (smooth, no lift; a one-element jump costs the chord (2/n)|sin(n Delta/2)| instead of the arc); exact chain-rule residual and tangent.
+int symFold = atoi(arg("-symfold", "0"));
+int symN = atoi(arg("-symn", "2"));
+real symP = 2*pi/symN;
+Vh1 th0sym = 0.;
+if (isA) {
+  real ls = 0.04;
+  solve sm(th0s, xi) = int2d(Th)(th0s*xi + ls*ls*(dx(th0s)*dx(xi) + dy(th0s)*dy(xi))) - int2d(Th)(thg0*xi);
+  if (symFold) {   // symmetric reference: smooth (cos n theta0, sin n theta0), so boundaries take the short way modulo the period
+    Vh1 c0s, s0s; Ph cg0 = cos(symN*thg0), sg0 = sin(symN*thg0);
+    solve smc(c0s, xi) = int2d(Th)(c0s*xi + ls*ls*(dx(c0s)*dx(xi) + dy(c0s)*dy(xi))) - int2d(Th)(cg0*xi);
+    solve sms(s0s, xi) = int2d(Th)(s0s*xi + ls*ls*(dx(s0s)*dx(xi) + dy(s0s)*dy(xi))) - int2d(Th)(sg0*xi);
+    th0sym = atan2(s0s, c0s)/symN;
+  }
+} else {
+  th0s = 0;
+}
+// -kwcfield 1 (2026-11-02; needs -variant A -symfold 1|2): separate KWC orientation field vartheta (P1, absolute angle).
+//   -symfold 2 (recommended): vartheta enters through z = exp(i n vartheta) (chord metric: a symmetric two-element split of a
+//   wound jump is a maximum, so it unwinds); -symfold 1: lifted gradient (the same split is a local minimum, see notes).
+//   The KWC terms (orientation energy, phi equation, recovery, diag) use the lifted gradient of vartheta instead of
+//   theta0sym + theta; the lattice orientation theta_s = theta0sym + theta is tied to it by the pi-periodic penalty
+//   (kap phi^p / n^2)(1 - cos n(theta_s - vartheta)): stiff in the grains (phi ~ 1), soft in the boundary cores, so the
+//   boundary orientation profile relaxes on its own (and can unwind a winding past 90 deg by concentrating into one element,
+//   where the lift measures the short way) instead of being carried by the Cosserat lattice rotation.
+//   vartheta evolves after each step by the backward-Euler gradient flow tau dvartheta/dt = -dE/dvartheta (lagged-diffusivity
+//   iterations); the lattice feels the penalty torque (exact residual + tangent in the global Newton).
+//   -kwckap kap (GPa), -kwcp p, -kwctau tau (GPa ns), -kwcit max Newton iterations per step.
+//   -kwcinit 1 (test only, any -kwcfield): lattice reference theta0sym AND vartheta := th0s, the arithmetic smoothing of the raw
+//   labels, i.e. a lattice orientation that winds the long way across every > p/2 labelled jump (the winding problem).
+int kwcField = atoi(arg("-kwcfield", "0"));
+real kwcKap = atof(arg("-kwckap", "10")), kwcP = atof(arg("-kwcp", "2")), kwcTau = atof(arg("-kwctau", "1e-3"));
+int kwcInit = atoi(arg("-kwcinit", "0")), kwcIt = atoi(arg("-kwcit", "50"));
+// -kwconeway 1 (test): vartheta is pulled toward the lattice but the lattice gets no reaction torque (no KWC torque on the
+//   lattice at all: it is purely mechanical; KWC acts on it only through phi).  Not variational for the lattice.
+int kwcOneWay = atoi(arg("-kwconeway", "0"));
+if (kwcReg == 1 && (kwcField || symFold == 2)) { cout << "ERROR: -kwcreg 1 is implemented for -symfold 0|1 without -kwcfield" << endl; exit(1); }
+if ((kwcField || kwcInit) && (!isA || symFold < 1)) { cout << "ERROR: -kwcfield / -kwcinit need -variant A and -symfold 1 or 2" << endl; exit(1); }
+Vh1 thk = th0sym, thkn = th0sym, thc1 = 0;   // vartheta, its previous value, current lattice theta (P1 copy for the coupling forms)
+if (kwcInit && isA) { th0sym = th0s; thk = th0s; thkn = thk; cout << "-kwcinit 1 (test): lattice reference AND vartheta = arithmetic smoothing of the raw labels (wound the long way across > p/2 labelled jumps)" << endl; }
+// -kwcspin w (test, relaxation steps only): rotate the lattice reference theta0sym of grain -kwcspingrain g by w deg per step
+//   (smoothed indicator), driving that boundary's misorientation through 90 deg quasi-statically: the dynamic winding test.
+//   Prints "SPIN step rotation_deg min_phi energy" per step.
+real kwcSpin = atof(arg("-kwcspin", "0"))*pi/180; int kwcSpinG = atoi(arg("-kwcspingrain", "2")); int kwcSpinCo = atoi(arg("-kwcspinco", "1"));
+Vh1 hSpin = 0;
+if (kwcSpin != 0 && isA) { Ph ind; for (int k = 0; k < nt; k++) ind[][k] = (Th[k].label == kwcSpinG ? 1. : 0.);
+  real lsI = 0.04; solve smI(hSpin, xi) = int2d(Th)(hSpin*xi + lsI*lsI*(dx(hSpin)*dx(xi) + dy(hSpin)*dy(xi))) - int2d(Th)(ind*xi); }
+Ph DkK, sKx, sKy, KH11, KH12, KH22;          // vartheta Newton: dpsi/dq/q, lifted gradient, tangent H
+int kwcItLast = 0, kwcLS = 0; real kwcDmx = 0;
+varf vKCr([a1,a2,a3],[v1,v2,ze]) = int2d(Th)( kwcKap*phi^kwcP*sin(symN*(th0sym + thc1 - thk))/symN*ze );
+varf vKCt([u1,u2,th],[v1,v2,ze]) = int2d(Th)( kwcKap*phi^kwcP*cos(symN*(th0sym + thc1 - thk))*th*ze );
+matrix Kkc;
+
+// ---------------- operators -------------------------------------------
+macro symv(a1,a2) [dx(a1), dy(a2), 0.5*(dy(a1)+dx(a2))] //
+macro rotv(a1,a2) (0.5*(dx(a2)-dy(a1))) //
+macro sig11(e1,e2,e3) (c11*(e1) + c12*(e2) + 2*c16*(e3)) //
+macro sig22(e1,e2,e3) (c12*(e1) + c22*(e2) + 2*c26*(e3)) //
+macro sig12(e1,e2,e3) (c16*(e1) + c26*(e2) + 2*c66*(e3)) //
+macro dbl(e1,e2,e3,f1,f2,f3) (sig11(e1,e2,e3)*(f1) + sig22(e1,e2,e3)*(f2) + 2*sig12(e1,e2,e3)*(f3)) //
+
+real curvK = isA ? 0. : Acurv;
+// true linear operator (elastic + Cosserat coupling + F curvature)
+varf vK([u1,u2,th],[v1,v2,ze]) =
+  int2d(Th)( dbl(dx(u1),dy(u2),0.5*(dy(u1)+dx(u2)), dx(v1),dy(v2),0.5*(dy(v1)+dx(v2)))
+           + 4*muc*(rotv(u1,u2) - th)*(rotv(v1,v2) - ze)
+           + curvK*(dx(th)*dx(ze) + dy(th)*dy(ze)) );
+// approximate tangent: GB-spin-relaxed coupling (A) and KWC secant stiffness
+Ph mucE = muc, H11 = 0, H12 = 0, H22 = 0, cspin = 0, kvc = 0;   // kvc: volumetric tangent correction (K(J) - K0)+ (eos)
+varf vKa([u1,u2,th],[v1,v2,ze]) =
+  int2d(Th)( dbl(dx(u1),dy(u2),0.5*(dy(u1)+dx(u2)), dx(v1),dy(v2),0.5*(dy(v1)+dx(v2)))
+           + 4*muc*(rotv(u1,u2) - th)*(rotv(v1,v2) - ze)
+           + curvK*(dx(th)*dx(ze) + dy(th)*dy(ze))
+           + H11*dx(th)*dx(ze) + H12*(dx(th)*dy(ze) + dy(th)*dx(ze)) + H22*dy(th)*dy(ze)
+           + kvc*(dx(u1) + dy(u2))*(dx(v1) + dy(v2)) );
+varf vMu([u1,u2,th],[v1,v2,ze]) = int2d(Th)(rho*(u1*v1 + u2*v2));
+varf vMt([u1,u2,th],[v1,v2,ze]) = int2d(Th)(rho*jz*th*ze);
+// -dir shearpiston (2026-11-01): left edge clamped (u = 0, no-slip substrate); right edge a moving plate, u_x = -d_n(t) (-pistonup,
+//   may be 0) and u_y = +d_t(t) (-pistonut); top and bottom traction-free (rollers would block the shear).
+bool isSP = (ldir == "shearpiston");
+bool isP = (ldir == "piston") || isSP;
+int LBa = 1, LBb = 1, LBc = 9999, LBd = 9999, LBe = 9999, LBf = 9999;      // label that constrains: left u1, left u2, bottom u2, top u2, right u1, right u2
+if (isP) { LBb = 9999; LBc = 2; LBd = 4; LBe = 3; }
+if (isSP) { LBb = 1; LBc = 9999; LBd = 9999; LBe = 3; LBf = 3; }
+varf vBC([u1,u2,th],[v1,v2,ze]) = on(LBa, u1 = 0) + on(LBb, u2 = 0) + on(LBc, u2 = 0) + on(LBd, u2 = 0) + on(LBe, u1 = 0) + on(LBf, u2 = 0);
+
+real c0 = 4./(dt*dt), c1 = 4./dt;
+matrix Mu = vMu(Wh, Wh), Mt = vMt(Wh, Wh);
+matrix Mall = Mu + Mt;
+matrix Ktrue = vK(Wh, Wh);
+matrix Aeff, Kpl;
+bool usePlTan = false;
+varf vR([u1,u2,th],[q]) = int2d(Th)((rotv(u1,u2) - th)*q);
+varf vDs([a],[q]) = int2d(Th)(cspin*a*q);
+// -tangent consistent|approx (see consistentTangent below)
+string tanName = arg("-tangent", "approx");
+int tanMode = (tanName == "consistent" && isA) ? 1 : 0;
+real fdK = atof(arg("-fdk", "1e-6")), fdQ = atof(arg("-fdq", "1e-8"));
+int nPolish = atoi(arg("-polish", "20"));   // exact coupled local Newton iterations after the robust local loop
+Ph cD00, cD01, cD02, cD03, cD04, cD10, cD11, cD12, cD13, cD14, cD20, cD21, cD22, cD23, cD24, cD30, cD31, cD32, cD33, cD34, cD40, cD41, cD42, cD43, cD44;
+Ph cL0, cL1, cL2, cL3, cL4, cG0, cG1, cG2, cG3, cG4, cCc;   // -mucdual 1 multiplier blocks
+varf vBLm([a], [v1,v2,ze]) = int2d(Th, qft = qf1pT)( a*(cL0*dx(v1) + cL1*dy(v1) + cL2*dx(v2) + cL3*dy(v2) + cL4*ze) );
+varf vGLm([u1,u2,th], [q]) = int2d(Th, qft = qf1pT)( q*(cG0*dx(u1) + cG1*dy(u1) + cG2*dx(u2) + cG3*dy(u2) + cG4*th) );
+varf vCLm([a], [q]) = int2d(Th, qft = qf1pT)( cCc*a*q );
+matrix Abig, DmB;
+// -mucdual 1: the block system lives on the vector space WhD = [P2, P2, P1, P0] (lambda as the 4th, P0 component), so it is one
+// FE matrix (serial: UMFPACK; MPI: one PETSc Mat with the native ownership); PW, PL embed (u, theta) resp. lambda into WhD (exact)
+fespace WhD(Th, [P2, P2, P1, P0]);
+matrix PW, PL, PWt, PLt;
+int[int] cW2D = [0, 1, 2, -1], cL2D = [-1, -1, -1, 0];
+if (mucDual == 1) { PW = interpolate(WhD, Wh, U2Vc = cW2D); PL = interpolate(WhD, Ph, U2Vc = cL2D); PWt = PW'; PLt = PL'; }
+// consistent element tangent as one bilinear form: barycentre quadrature evaluates the element-mean gradients exactly
+varf vKc([u1,u2,th],[v1,v2,ze]) = int2d(Th, qft = qf1pT)( cD00*dx(u1)*dx(v1) + cD01*dy(u1)*dx(v1) + cD02*dx(u2)*dx(v1) + cD03*dy(u2)*dx(v1) + cD04*th*dx(v1) + cD10*dx(u1)*dy(v1) + cD11*dy(u1)*dy(v1) + cD12*dx(u2)*dy(v1) + cD13*dy(u2)*dy(v1) + cD14*th*dy(v1) + cD20*dx(u1)*dx(v2) + cD21*dy(u1)*dx(v2) + cD22*dx(u2)*dx(v2) + cD23*dy(u2)*dx(v2) + cD24*th*dx(v2) + cD30*dx(u1)*dy(v2) + cD31*dy(u1)*dy(v2) + cD32*dx(u2)*dy(v2) + cD33*dy(u2)*dy(v2) + cD34*th*dy(v2) + cD40*dx(u1)*ze + cD41*dy(u1)*ze + cD42*dx(u2)*ze + cD43*dy(u2)*ze + cD44*th*ze );
+
+// consistent mode: KWC curvature tangent + consistent element tangent in one bilinear form (one assembly per rebuild)
+varf vKvC([u1,u2,th],[v1,v2,ze]) =
+  int2d(Th)( H11*dx(th)*dx(ze) + H12*(dx(th)*dy(ze) + dy(th)*dx(ze)) + H22*dy(th)*dy(ze) )
+  + int2d(Th, qft = qf1pT)( cD00*dx(u1)*dx(v1) + cD01*dy(u1)*dx(v1) + cD02*dx(u2)*dx(v1) + cD03*dy(u2)*dx(v1) + cD04*th*dx(v1) + cD10*dx(u1)*dy(v1) + cD11*dy(u1)*dy(v1) + cD12*dx(u2)*dy(v1) + cD13*dy(u2)*dy(v1) + cD14*th*dy(v1) + cD20*dx(u1)*dx(v2) + cD21*dy(u1)*dx(v2) + cD22*dx(u2)*dx(v2) + cD23*dy(u2)*dx(v2) + cD24*th*dx(v2) + cD30*dx(u1)*dy(v2) + cD31*dy(u1)*dy(v2) + cD32*dx(u2)*dy(v2) + cD33*dy(u2)*dy(v2) + cD34*th*dy(v2) + cD40*dx(u1)*ze + cD41*dy(u1)*ze + cD42*dx(u2)*ze + cD43*dy(u2)*ze + cD44*th*ze );
+// consistent mode: the whole matrix in ONE assembly (avoids sparse additions): linear elastic + Cosserat + inertia
+// + KWC tangent + consistent element tangent + Dirichlet penalty
+varf vAall([u1,u2,th],[v1,v2,ze]) =
+  int2d(Th)( dbl(dx(u1),dy(u2),0.5*(dy(u1)+dx(u2)), dx(v1),dy(v2),0.5*(dy(v1)+dx(v2)))
+           + 4*muc*(rotv(u1,u2) - th)*(rotv(v1,v2) - ze)
+           + curvK*(dx(th)*dx(ze) + dy(th)*dy(ze))
+           + c0*rho*(u1*v1 + u2*v2) + c0*rho*jz*th*ze )
+  +
+  int2d(Th)( H11*dx(th)*dx(ze) + H12*(dx(th)*dy(ze) + dy(th)*dx(ze)) + H22*dy(th)*dy(ze) )
+  + int2d(Th, qft = qf1pT)( cD00*dx(u1)*dx(v1) + cD01*dy(u1)*dx(v1) + cD02*dx(u2)*dx(v1) + cD03*dy(u2)*dx(v1) + cD04*th*dx(v1) + cD10*dx(u1)*dy(v1) + cD11*dy(u1)*dy(v1) + cD12*dx(u2)*dy(v1) + cD13*dy(u2)*dy(v1) + cD14*th*dy(v1) + cD20*dx(u1)*dx(v2) + cD21*dy(u1)*dx(v2) + cD22*dx(u2)*dx(v2) + cD23*dy(u2)*dx(v2) + cD24*th*dx(v2) + cD30*dx(u1)*dy(v2) + cD31*dy(u1)*dy(v2) + cD32*dx(u2)*dy(v2) + cD33*dy(u2)*dy(v2) + cD34*th*dy(v2) + cD40*dx(u1)*ze + cD41*dy(u1)*ze + cD42*dx(u2)*ze + cD43*dy(u2)*ze + cD44*th*ze )
+  + on(LBa, u1 = 0) + on(LBb, u2 = 0) + on(LBc, u2 = 0) + on(LBd, u2 = 0) + on(LBe, u1 = 0) + on(LBf, u2 = 0);
+int curStep = 0, curIt = -1, nanHit = 0; real curT = 0;   // (stage tracking, see mark())
+real tTanEl = 0, tTanAsm = 0, tTanFD = 0, tTanKc = 0, tTanPre = 0;
+matrix Kcons, Kz;   // Kz: -symfold 2 KWC tangent
+// ---- linear algebra (2026-10-31) ----
+// constant part (linear elastic + Cosserat + F curvature + inertia + Dirichlet penalty) assembled once; per rebuild only the
+// state-dependent part (KWC tangent, EOS correction, consistent element tangent / plastic condensation) is assembled.
+// -linsolver umfpack (direct, default) | gmres (restarted GMRES, ILU(0) preconditioner rebuilt with the tangent; falls back to
+// the direct solver for a solve that does not reach -lintol)
+string linName = arg("-linsolver", "umfpack");
+int linMode = (linName == "gmres") ? 1 : 0;
+real linTol = atof(arg("-lintol", "1e-10"));
+int krylovDim = atoi(arg("-krylov", "100")), linMaxIt = atoi(arg("-linmaxit", "1000"));
+int kcVarf = atoi(arg("-kcvarf", "1"));
+int slipPred = atoi(arg("-slippred", "0"));     // 1: start the local solve of a step from the previous step's increments (rates carried over)
+int tanEvery = atoi(arg("-tanevery", "1"));     // full Newton: rebuild the tangent every tanEvery global iterations          // 1: consistent element tangent assembled by one varf (barycentre quadrature); 0: sparse products
+matrix Kconst, Lilu, Uilu; bool haveKconst = false, havePre = false, consReady = false; int nPre = 0;
+int precEvery = atoi(arg("-precevery", "0"));   // GMRES: rebuild the ILU(0) preconditioner every n global iterations (0: once per step)
+int nLinFall = 0; real linResMax = 0;
+func real[int] PreconILU(real[int] & bb) { iluSolve(Lilu, Uilu, bb); return bb; }
+// state-dependent operator: KWC curvature tangent + volumetric EOS correction
+varf vKv([u1,u2,th],[v1,v2,ze]) =
+  int2d(Th)( H11*dx(th)*dx(ze) + H12*(dx(th)*dy(ze) + dy(th)*dx(ze)) + H22*dy(th)*dy(ze)
+           + kvc*(dx(u1) + dy(u2))*(dx(v1) + dy(v2)) );
+func int buildA() {
+  if (!haveKconst) {
+    matrix K0 = vK(Wh, Wh); matrix Ab = vBC(Wh, Wh);
+    Kconst = K0 + c0*Mu; Kconst = Kconst + c0*Mt; Kconst = Kconst + Ab; haveKconst = true;
+  }
+  real tk0 = clock();
+  if (tanMode == 1 && kcVarf && consReady) { Aeff = vAall(Wh, Wh); if (isA && symFold == 2 && !kwcField) Aeff = Aeff + Kz; }
+  else {
+    matrix Kv = vKv(Wh, Wh); Aeff = Kconst + Kv;
+    if (tanMode == 1) { if (Kcons.n == Aeff.n) Aeff = Aeff + Kcons; }
+    else if (usePlTan) Aeff = Aeff + (-1.)*Kpl;
+  }
+  if (kwcField && !kwcOneWay) { if (Kkc.n == Aeff.n) Aeff = Aeff + Kkc; }
+  tTanKc += clock() - tk0;
+  if (linMode == 1) {
+    real tp0 = clock(); set(Aeff, solver = GMRES, eps = linTol, nbiter = linMaxIt, dimKrylov = krylovDim, precon = PreconILU);
+    bool newPre = !havePre || (precEvery == 0 ? (curIt <= 0 || curIt == 1000) : ((curIt % precEvery) == 0));
+    if (newPre) { iLU(Aeff, Lilu, Uilu); havePre = true; nPre++; }   // ILU(0) of the current matrix; reused (stale) between rebuilds
+    tTanPre += clock() - tp0;
+  }
+  else if (mucDual == 1) {
+    matrix BLm = vBLm(Ph, Wh), GLm = vGLm(Wh, Ph), CLm = vCLm(Ph, Ph);
+    BLm = DmB*BLm;   // no multiplier coupling in the Dirichlet rows
+    matrix T1 = PW*Aeff; T1 = T1*PWt; matrix T2 = PW*BLm; T2 = T2*PLt; Abig = T1 + T2;
+    T1 = PL*GLm; T1 = T1*PWt; Abig = Abig + T1; T2 = PL*CLm; T2 = T2*PLt; Abig = Abig + T2;
+    set(Abig, solver = sparsesolver);
+  }
+  else set(Aeff, solver = sparsesolver);
+  return 0;
+}
+
+
+// loads
+real Tload = 0;
+real dxl = 0., dyl = 1.; if (ldir == "comp") { dxl = -1.; dyl = 0.; }
+if (ldir == "combo") { dxl = -1.; dyl = ampS/amp; }   // traction = amp*env*(-1, ampS/amp) = (-amp, +ampS) GPa
+func real envelope(real t) {
+  real s, r = 0;
+  if (t < 2) { s = t/2; r = 6*s^5 - 15*s^4 + 10*s^3; }
+  else if (t < 5) r = 1;
+  else if (t < 7) { s = (t-5)/2; r = 1 - (6*s^5 - 15*s^4 + 10*s^3); }
+  return r;
+}
+varf vF([u1,u2,th],[v1,v2,ze]) =
+  int1d(Th, 3)(Tload*(dxl*v1 + dyl*v2))
+  + int2d(Th)( dbl(hp11,hp22,hp12, dx(v1),dy(v2),0.5*(dy(v1)+dx(v2)))
+             + 4*muc*omp*(rotv(v1,v2) - ze)
+             + curvK*(kq1*dx(ze) + kq2*dy(ze)) );
+// KWC couple stress correction (A): -(m_K(grad theta_tot) - Ht grad th).grad ze
+macro gtx() GSX //
+macro gty() GSY //
+macro gphi() (-2*(phi + log(1 - phi))) //   (phi is clamped to [0, phimax] at the nodes after every update)
+macro mKfac() (f0*(sK*gphi*(wSq/sqrt(gtx^2+gty^2+dlt^2) + wKG*(gtx^2+gty^2 > 0 ? tanh(gK*sqrt(gtx^2+gty^2))/sqrt(gtx^2+gty^2) : gK)) + eK^2)) //
+varf vKWC([a1,a2,a3],[v1,v2,ze]) =
+  int2d(Th)( -(mKfac*gtx - Ht*dx(th))*dx(ze) - (mKfac*gty - Ht*dy(th))*dy(ze) );
+varf vBCr([u1,u2,th],[v1,v2,ze]) = on(1, u1 = 0, u2 = 0);   // (unused)
+
+// precomputed operators: plastic P0 fields -> RHS, unit traction -> RHS
+macro F1() dx(v1) //
+macro F2() dy(v2) //
+macro F3() (0.5*(dy(v1)+dx(v2))) //
+varf vB1([a], [v1,v2,ze]) = int2d(Th)(a*(c11*F1 + c12*F2 + 2*c16*F3));
+varf vB2([a], [v1,v2,ze]) = int2d(Th)(a*(c12*F1 + c22*F2 + 2*c26*F3));
+varf vB3([a], [v1,v2,ze]) = int2d(Th)(a*(2*c16*F1 + 2*c26*F2 + 4*c66*F3));
+varf vBw([a], [v1,v2,ze]) = int2d(Th)(4*muc*a*(rotv(v1,v2) - ze));
+varf vBk1([a], [v1,v2,ze]) = int2d(Th)(curvK*a*dx(ze));
+varf vBk2([a], [v1,v2,ze]) = int2d(Th)(curvK*a*dy(ze));
+matrix B1 = vB1(Ph, Wh), B2 = vB2(Ph, Wh), B3 = vB3(Ph, Wh), Bw = vBw(Ph, Wh), Bk1 = vBk1(Ph, Wh), Bk2 = vBk2(Ph, Wh);
+varf vT1([a1,a2,a3],[v1,v2,ze]) = int1d(Th, 3)(dxl*v1 + dyl*v2);
+real[int] Fun = vT1(0, Wh);
+varf vG1([a], [v1,v2,ze]) = int2d(Th)(a*dx(ze));
+varf vG2([a], [v1,v2,ze]) = int2d(Th)(a*dy(ze));
+matrix Bg1 = vG1(Ph, Wh), Bg2 = vG2(Ph, Wh);
+// element-mean finite-strain correction: r = sum_e A_e dDpsi/dFbar : grad v + dDpsi/dthbar ze  (P0 coefficient times test)
+varf vC11([a], [v1,v2,ze]) = int2d(Th)(a*dx(v1));
+varf vC12([a], [v1,v2,ze]) = int2d(Th)(a*dy(v1));
+varf vC21([a], [v1,v2,ze]) = int2d(Th)(a*dx(v2));
+varf vC22([a], [v1,v2,ze]) = int2d(Th)(a*dy(v2));
+varf vCth([a], [v1,v2,ze]) = int2d(Th)(a*ze);
+matrix BC11 = vC11(Ph, Wh), BC12 = vC12(Ph, Wh), BC21 = vC21(Ph, Wh), BC22 = vC22(Ph, Wh), BCth = vCth(Ph, Wh);
+real[int] rpl(Wh.ndof);
+
+// heat
+varf vTh(T, xi) = int2d(Th)(rhoC/dt*T*xi + kth*(dx(T)*dx(xi) + dy(T)*dy(xi)));
+matrix ATh = vTh(Vh1, Vh1, solver = sparsesolver);
+Ph Dsrc;
+varf vTr(T, xi) = int2d(Th)(rhoC/dt*Tn*xi + Dsrc/dt*xi);
+
+// ---------------- local constitutive update (array based) --------------
+real[int] ta(nt), tb(nt), tcc(nt), tauc(nt), etad(nt), tmp(nt), tmp2(nt), xa(nt), lx(nt);
+real[int] ga(nt), gb(nt), gc(nt), dga(nt), dgb(nt), dgc(nt), ra(nt), rb(nt), rc(nt), wloc(nt);
+real[int] e11(nt), e22(nt), e12(nt), wu(nt), thc(nt), gt1(nt), gt2(nt), phic(nt), Tcel(nt);
+real[int] m11(nt), m12(nt), m13(nt), m21(nt), m22(nt), m23(nt), m31(nt), m32(nt), m33(nt), det(nt), da(nt), db(nt), dc(nt);
+real[int] dpmax(nt), nua(nt), nub(nt), nuc(nt), one(nt); one = 1;
+// GB spin eliminated exactly: w_after = (1-beta) w_trial, beta = dt k/(1 + dt k), k = 2 muc (1-phi)^2/eta*
+real[int] betaS(nt), omb(nt), wtr(nt), Gx11(nt), Gx22(nt), Gx33(nt), Gx12(nt), Gx13(nt), Gx23(nt);
+betaS = 0; omb = 1;
+
+// effective drag eE(|t|) and d eE/d|t|:  rel = 1 and -vc > 0: eE = etad sqrt(1 + s^2), s = |t|/(etad rho_m b v_c)
+real[int] etaE(nt), detaE(nt), eEa(nt), eEb(nt), eEc(nt);
+func int effDrag(real[int] & t, int rel) {
+  etaE = etad; detaE = 0;
+  if (rel && vcrel > 0) {
+    real[int] s = abs(t); tmp = etad .* gcrit; s = s ./ tmp;            // s = |t|/(etad gcrit)
+    real[int] q = s .* s; q += 1; q = sqrt(q);                         // sqrt(1+s^2)
+    etaE = etad .* q;
+    detaE = s ./ q; detaE = detaE ./ gcrit;                            // d eE/d|t| = s/(sqrt(1+s^2) gcrit)
+  }
+  return 0;
+}
+// magnitude rate |gd| and d|gd|/d|tau| for stress t, strength factor f; eo returns the effective drag used
+func int flow(real[int] & t, real f, real[int] & gd, real[int] & dgd, real[int] & eo, int rel) {
+  effDrag(t, rel); eo = etaE;
+  xa = abs(t); xa = xa ./ tauc; xa *= 1./f;
+  tmp = xa; tmp -= 300.; tmp = abs(tmp); xa += 300.; xa -= tmp; xa *= 0.5;   // min(x, 300)
+  tmp = xa; tmp += 1e-300; lx = log(tmp);
+  tmp = lx; tmp *= mexp; real[int] xm = exp(tmp);
+  tmp = lx; tmp *= (mexp - 1); real[int] xm1 = exp(tmp);
+  real[int] cc = etaE ./ tauc; cc *= 1./f;
+  real[int] Dn = cc .* xm1; Dn += 1./g0;
+  gd = xm ./ Dn;
+  real[int] num = cc .* xm1; num = num .* xm1; tmp = xm1; tmp *= mexp/g0; num += tmp;
+  real[int] den = Dn .* Dn;
+  dgd = num ./ den; tmp = tauc; tmp *= f; dgd = dgd ./ tmp;
+  if (rel && vcrel > 0) {   // eta depends on |t|: d gd/d|t| -= xm xm1/(f tauc) d eE/d|t| / Dn^2
+    tmp = xm .* xm1; tmp = tmp .* detaE; tmp = tmp ./ den; tmp2 = tauc; tmp2 *= f; tmp = tmp ./ tmp2; dgd -= tmp;
+  }
+  return 0;
+}
+// drag-limited bound on an increment: 2 dt |t|/eE  (eE includes the relativistic factor)
+func int dragBound(real[int] & t, real[int] & eo) { dpmax = abs(t); dpmax = dpmax ./ eo; dpmax *= 2*dt; dpmax += 1e-12; return 0; }
+func int sgn(real[int] & t, real[int] & s) { tmp = abs(t); tmp += 1e-300; s = t ./ tmp; return 0; }
+
+// solve (I + dt*diag(dg)*G) d = -r  for all elements (Cramer)
+func int solve3(real[int] & Ga, real[int] & Gb, real[int] & Gc, real[int] & Gab, real[int] & Gac, real[int] & Gbc) {
+  m11 = dga .* Ga; m11 *= dt; m11 += 1;   m12 = dga .* Gab; m12 *= dt;   m13 = dga .* Gac; m13 *= dt;
+  m21 = dgb .* Gab; m21 *= dt;   m22 = dgb .* Gb; m22 *= dt; m22 += 1;   m23 = dgb .* Gbc; m23 *= dt;
+  m31 = dgc .* Gac; m31 *= dt;   m32 = dgc .* Gbc; m32 *= dt;   m33 = dgc .* Gc; m33 *= dt; m33 += 1;
+  real[int] A1 = m22 .* m33; tmp = m23 .* m32; A1 -= tmp;
+  real[int] A2 = m21 .* m33; tmp = m23 .* m31; A2 -= tmp;
+  real[int] A3 = m21 .* m32; tmp = m22 .* m31; A3 -= tmp;
+  det = m11 .* A1; tmp = m12 .* A2; det -= tmp; tmp = m13 .* A3; det += tmp;
+  // d = M^-1 (-r) via adjugate
+  real[int] i11 = A1, i12(nt), i13(nt), i21(nt), i22(nt), i23(nt), i31(nt), i32(nt), i33(nt);
+  i12 = m13 .* m32; tmp = m12 .* m33; i12 -= tmp;
+  i13 = m12 .* m23; tmp = m13 .* m22; i13 -= tmp;
+  i21 = -A2;
+  i22 = m11 .* m33; tmp = m13 .* m31; i22 -= tmp;
+  i23 = m13 .* m21; tmp = m11 .* m23; i23 -= tmp;
+  i31 = A3;
+  i32 = m12 .* m31; tmp = m11 .* m32; i32 -= tmp;
+  i33 = m11 .* m22; tmp = m12 .* m21; i33 -= tmp;
+  da = i11 .* ra; tmp = i12 .* rb; da += tmp; tmp = i13 .* rc; da += tmp; da = da ./ det; da *= -1;
+  db = i21 .* ra; tmp = i22 .* rb; db += tmp; tmp = i23 .* rc; db += tmp; db = db ./ det; db *= -1;
+  dc = i31 .* ra; tmp = i32 .* rb; dc += tmp; tmp = i33 .* rc; dc += tmp; dc = dc ./ det; dc *= -1;
+  return 0;
+}
+real[int] cl1(nt), cl2(nt);
+func int clampv(real[int] & v, real[int] & vmax) {
+  // v = min(v, M);  v = max(v, -M)   (vectorized)
+  cl1 = v; cl1 -= vmax; cl1 = abs(cl1); cl2 = v; cl2 += vmax; cl2 -= cl1; cl2 *= 0.5; v = cl2;
+  cl1 = v; cl1 += vmax; cl1 = abs(cl1); cl2 = v; cl2 -= vmax; cl2 += cl1; cl2 *= 0.5; v = cl2;
+  return 0;
+}
+
+// ---------------- finite-deformation element stresses -------------------
+real[int] hy1(nt), hx2(nt);                                   // centroid du1/dy, du2/dx
+real[int] fi11(nt), fi12(nt), fi21(nt), fi22(nt);             // Fp^-1 (trial)
+real[int] ub11(nt), ub12(nt), ub21(nt), ub22(nt);             // Ubar = R^T Fbar Fp^-1
+real[int] lamS(nt), lamNext(nt); lamS = 0; lamNext = 0;   // -mucdual multiplier (committed) and its update at the end of the step
+real[int] Sb11(nt), Sb22(nt), Sb12(nt), Eb11(nt), Eb22(nt), Eb12(nt), aa(nt);   // 2nd PK in the Cosserat frame, Green strain, skew
+real[int] Pi11(nt), Pi12(nt), Pi21(nt), Pi22(nt);             // Pi = dpsi/dUbar
+real[int] PF11(nt), PF12(nt), PF21(nt), PF22(nt), psth(nt), psiF(nt);   // dpsi/dFbar, dpsi/dthbar, psi (finite)
+real[int] PL11(nt), PL12(nt), PL21(nt), PL22(nt), plth(nt), psiL(nt);   // the same for the quadratic (small-strain) energy
+real[int] dP11(nt), dP12(nt), dP21(nt), dP22(nt), dPth(nt);   // correction = finite - quadratic
+real[int] Mn11(nt), Mn12(nt), Mn21(nt), Mn22(nt), tstar(nt), kspin(nt); kspin = 0;   // Mandel stress Ubar^T Pi, spin drive
+real[int] rqp(nt), rqn(nt), wex(nt);
+real[int] jdet(nt), S33e(nt), Peos(nt), Keos(nt);   // J, out-of-plane 2nd PK, pressure, tangent bulk modulus (eos)
+real[int] cth(nt), sth(nt), q2(nt), cE(nt), sE(nt), L11(nt), L12(nt), L21(nt), L22(nt), dtf(nt);
+// trial Fp = exp(dLp) Fp_n, dLp = sum dgamma_a s_a(x)n_a + dw* What  (traceless: exact exp via q^2 = -det dLp)
+func int trialFp() {
+  L11 = A11a .* dpa; tmp = A11b .* dpb; L11 += tmp; tmp = A11c .* dpc; L11 += tmp;
+  L12 = A12a .* dpa; tmp = A12b .* dpb; L12 += tmp; tmp = A12c .* dpc; L12 += tmp; L12 -= dwst;
+  L21 = A21a .* dpa; tmp = A21b .* dpb; L21 += tmp; tmp = A21c .* dpc; L21 += tmp; L21 += dwst;
+  L22 = A22a .* dpa; tmp = A22b .* dpb; L22 += tmp; tmp = A22c .* dpc; L22 += tmp;
+  q2 = L11 .* L11; tmp = L12 .* L21; q2 += tmp;
+  // exact exp of a traceless 2x2 (Cayley-Hamilton: A^2 = q^2 I): exp(A) = c I + s A,
+  //   q^2 > 0: c = cosh q, s = sinh q / q;  q^2 < 0 (w = sqrt(-q^2)): c = cos w, s = sin w / w;  det exp(A) = 1 exactly.
+  // Series (error < 1e-20) where |q| < 1e-3 to avoid 0/0 (q^2 = 0 with A != 0 is the nilpotent single-slip case: exp = I + A).
+  tmp = q2 .* q2; cE = tmp; cE *= 1./24; tmp2 = q2; tmp2 *= 0.5; cE += tmp2; cE += 1;      // series cosh(q)
+  sE = tmp; sE *= 1./120; tmp2 = q2; tmp2 *= 1./6; sE += tmp2; sE += 1;                   // series sinh(q)/q
+  if (exactExp) {
+    rqp = q2; tmp = abs(q2); rqp += tmp; rqp *= 0.5; rqp = sqrt(rqp);          // sqrt(max(q2,0))
+    for [i, v : rqp] v = min(v, 50.);                                          // overflow guard: cosh/sinh finite (a diverged iterate is then rejected by its residual)
+    rqn = q2; rqn *= -1; rqn += tmp; rqn *= 0.5; rqn = sqrt(rqn);              // sqrt(max(-q2,0))
+    real[int] den = rqp + rqn;                                                 // |q|
+    tmp = den; tmp -= 1e-3; tmp2 = abs(tmp); tmp += tmp2; tmp2 *= 2; tmp2 += 1e-300; wex = tmp ./ tmp2;   // 1 where |q| > 1e-3, else 0
+    real[int] cx = cosh(rqp); tmp = cos(rqn); cx += tmp; cx -= 1;              // cosh(q) or cos(w)
+    real[int] sx = sinh(rqp); tmp = sin(rqn); sx += tmp; den += 1e-300; sx = sx ./ den;   // sinh(q)/q or sin(w)/w
+    tmp = one - wex; cE = cE .* tmp; sE = sE .* tmp; cx = cx .* wex; sx = sx .* wex; cE += cx; sE += sx;
+  }
+  L11 = L11 .* sE; L12 = L12 .* sE; L21 = L21 .* sE; L22 = L22 .* sE; L11 += cE; L22 += cE;  // exp(dLp)
+  tf11 = L11 .* fp11; tmp = L12 .* fp21; tf11 += tmp;
+  tf12 = L11 .* fp12; tmp = L12 .* fp22; tf12 += tmp;
+  tf21 = L21 .* fp11; tmp = L22 .* fp21; tf21 += tmp;
+  tf22 = L21 .* fp12; tmp = L22 .* fp22; tf22 += tmp;
+  return 0;
+}
+// stresses at the element-mean kinematics (e11, hy1, hx2, e22, thc) and the trial Fp
+// vol/dev split elastic law (see -eos). Uses ub.., Eb.. ; sets Sb.. (2nd PK w.r.t. Ebar), psiF (without the Cosserat skew term), S33e, Peos, Keos
+func int eosStress() {
+  real[int] Jc = jdet; for [i, v : Jc] v = max(v, 1e-6);
+  real[int] lJ = log(Jc);
+  real[int] Dd = lJ; Dd *= -2./3; Dd = exp(Dd);                         // J^{-2/3}
+  real[int] Cb11 = Eb11; Cb11 *= 2; Cb11 += 1; real[int] Cb22 = Eb22; Cb22 *= 2; Cb22 += 1; real[int] Cb12 = Eb12; Cb12 *= 2;
+  real[int] Et11 = Dd .* Cb11; Et11 -= 1; Et11 *= 0.5; real[int] Et22 = Dd .* Cb22; Et22 -= 1; Et22 *= 0.5;
+  real[int] Et12 = Dd .* Cb12; Et12 *= 0.5; real[int] Et33 = Dd; Et33 -= 1; Et33 *= 0.5;
+  real[int] q11 = C11 .* Et11; tmp = C12 .* Et22; q11 += tmp; tmp = C16 .* Et12; tmp *= 2; q11 += tmp;
+  real[int] q22 = C12 .* Et11; tmp = C22 .* Et22; q22 += tmp; tmp = C26 .* Et12; tmp *= 2; q22 += tmp;
+  real[int] q12 = C16 .* Et11; tmp = C26 .* Et22; q12 += tmp; tmp = C66 .* Et12; tmp *= 2; q12 += tmp;
+  real[int] bE = B11 .* Et11; tmp = B22 .* Et22; bE += tmp; tmp = B12 .* Et12; tmp *= 2; bE += tmp;   // B:Et
+  // W_iso = 1/2 Et:C2:Et + Et33 B:Et + 1/2 C33 Et33^2   (C33 = C_zzzz = Clxx, z = [-110])
+  psiF = q11 .* Et11; tmp = q22 .* Et22; psiF += tmp; tmp = q12 .* Et12; tmp *= 2; psiF += tmp; psiF *= 0.5;
+  tmp = Et33 .* bE; psiF += tmp; tmp = Et33 .* Et33; tmp *= 0.5*Clxx; psiF += tmp;
+  real[int] T11 = B11 .* Et33; T11 += q11; real[int] T22 = B22 .* Et33; T22 += q22; real[int] T12 = B12 .* Et33; T12 += q12;
+  real[int] T33 = Et33; T33 *= Clxx; T33 += bE;
+  // volumetric EOS
+  real[int] Wv(nt);
+  if (eosMode == 1) {   // Murnaghan
+    real[int] Jk = lJ; Jk *= -Kpeos; Jk = exp(Jk);                     // J^-K'
+    Peos = Jk; Peos -= 1; Peos *= K0eos/Kpeos;
+    Keos = Jk; Keos *= K0eos;
+    Wv = Jk .* Jc; tmp = Jc; tmp *= (Kpeos - 1); Wv += tmp; Wv -= Kpeos; Wv *= K0eos/(Kpeos*(Kpeos - 1));   // (K'-1) J + J^{1-K'} - K'
+  } else {              // Vinet
+    real eta = 1.5*(Kpeos - 1);
+    real[int] x = lJ; x *= 1./3; x = exp(x);                            // J^{1/3}
+    real[int] omx = one - x;                                            // 1 - x
+    real[int] ee = omx; ee *= eta; ee = exp(ee);                        // exp(eta (1-x))
+    real[int] x2 = x .* x;
+    Peos = omx ./ x2; Peos = Peos .* ee; Peos *= 3*K0eos;
+    Wv = omx; Wv *= -eta; Wv += 1; Wv = Wv .* ee; Wv *= -1; Wv += 1; Wv *= 9*K0eos/(eta*eta);
+    Keos = x .* omx; Keos *= eta; Keos -= x; Keos += 2; Keos = Keos .* ee; Keos = Keos ./ x2; Keos *= K0eos;
+  }
+  psiF += Wv;
+  // S = J^{-2/3} [T - tr/3 Cbar^{-1}] - P J Cbar^{-1},  tr = T:Cbar + T33 ;  Cbar^{-1} = adj/J^2 ;  S33 = J^{-2/3}(T33 - tr/3) - P J
+  real[int] J2 = Jc .* Jc;
+  real[int] Ci11 = Cb22 ./ J2, Ci22 = Cb11 ./ J2, Ci12 = Cb12 ./ J2; Ci12 *= -1;
+  real[int] trT = T11 .* Cb11; tmp = T22 .* Cb22; trT += tmp; tmp = T12 .* Cb12; tmp *= 2; trT += tmp; trT += T33; trT *= 1./3;
+  real[int] PJ = Peos .* Jc;
+  Sb11 = trT .* Ci11; Sb11 *= -1; Sb11 += T11; Sb11 = Sb11 .* Dd; tmp = PJ .* Ci11; Sb11 -= tmp;
+  Sb22 = trT .* Ci22; Sb22 *= -1; Sb22 += T22; Sb22 = Sb22 .* Dd; tmp = PJ .* Ci22; Sb22 -= tmp;
+  Sb12 = trT .* Ci12; Sb12 *= -1; Sb12 += T12; Sb12 = Sb12 .* Dd; tmp = PJ .* Ci12; Sb12 -= tmp;
+  S33e = T33 - trT; S33e = S33e .* Dd; S33e -= PJ;
+  return 0;
+}
+func int finiteStress() {
+  dtf = tf11 .* tf22; tmp = tf12 .* tf21; dtf -= tmp;
+  fi11 = tf22 ./ dtf; fi22 = tf11 ./ dtf; fi12 = tf12 ./ dtf; fi12 *= -1; fi21 = tf21 ./ dtf; fi21 *= -1;
+  real[int] F11 = e11 + one, F22 = e22 + one;
+  real[int] A11 = F11 .* fi11; tmp = hy1 .* fi21; A11 += tmp;
+  real[int] A12 = F11 .* fi12; tmp = hy1 .* fi22; A12 += tmp;
+  real[int] A21 = hx2 .* fi11; tmp = F22 .* fi21; A21 += tmp;
+  real[int] A22 = hx2 .* fi12; tmp = F22 .* fi22; A22 += tmp;
+  cth = cos(thc); sth = sin(thc);
+  ub11 = cth .* A11; tmp = sth .* A21; ub11 += tmp;
+  ub12 = cth .* A12; tmp = sth .* A22; ub12 += tmp;
+  ub21 = cth .* A21; tmp = sth .* A11; ub21 -= tmp;
+  ub22 = cth .* A22; tmp = sth .* A12; ub22 -= tmp;
+  Eb11 = ub11 .* ub11; tmp = ub21 .* ub21; Eb11 += tmp; Eb11 -= 1; Eb11 *= 0.5;
+  Eb22 = ub12 .* ub12; tmp = ub22 .* ub22; Eb22 += tmp; Eb22 -= 1; Eb22 *= 0.5;
+  Eb12 = ub11 .* ub12; tmp = ub21 .* ub22; Eb12 += tmp; Eb12 *= 0.5;
+  jdet = ub11 .* ub22; tmp = ub12 .* ub21; jdet -= tmp;
+  if (eosMode == 0) {
+  Sb11 = C11 .* Eb11; tmp = C12 .* Eb22; Sb11 += tmp; tmp = C16 .* Eb12; tmp *= 2; Sb11 += tmp;
+  Sb22 = C12 .* Eb11; tmp = C22 .* Eb22; Sb22 += tmp; tmp = C26 .* Eb12; tmp *= 2; Sb22 += tmp;
+  Sb12 = C16 .* Eb11; tmp = C26 .* Eb22; Sb12 += tmp; tmp = C66 .* Eb12; tmp *= 2; Sb12 += tmp;
+  psiF = Sb11 .* Eb11; tmp = Sb22 .* Eb22; psiF += tmp; tmp = Sb12 .* Eb12; tmp *= 2; psiF += tmp; psiF *= 0.5;
+  S33e = B11 .* Eb11; tmp = B22 .* Eb22; S33e += tmp; tmp = B12 .* Eb12; tmp *= 2; S33e += tmp;
+  Keos = K0eos;
+  } else { eosStress(); }
+  aa = ub21 - ub12; aa *= 0.5;
+  tmp = aa .* aa; tmp *= 2*muc; psiF += tmp;
+  real[int] ska = aa; ska *= 2*muc;
+  if (mucDual) { tmp = lamS .* aa; tmp *= 2; psiF += tmp; ska += lamS; }   // -mucdual: + 2 lambda a
+  Pi11 = ub11 .* Sb11; tmp = ub12 .* Sb12; Pi11 += tmp;
+  Pi12 = ub11 .* Sb12; tmp = ub12 .* Sb22; Pi12 += tmp; Pi12 -= ska;
+  Pi21 = ub21 .* Sb11; tmp = ub22 .* Sb12; Pi21 += tmp; Pi21 += ska;
+  Pi22 = ub21 .* Sb12; tmp = ub22 .* Sb22; Pi22 += tmp;
+  // dpsi/dFbar = R Pi Fp^-T
+  real[int] B11 = cth .* Pi11; tmp = sth .* Pi21; B11 -= tmp;
+  real[int] B12 = cth .* Pi12; tmp = sth .* Pi22; B12 -= tmp;
+  real[int] B21 = sth .* Pi11; tmp = cth .* Pi21; B21 += tmp;
+  real[int] B22 = sth .* Pi12; tmp = cth .* Pi22; B22 += tmp;
+  PF11 = B11 .* fi11; tmp = B12 .* fi12; PF11 += tmp;
+  PF12 = B11 .* fi21; tmp = B12 .* fi22; PF12 += tmp;
+  PF21 = B21 .* fi11; tmp = B22 .* fi12; PF21 += tmp;
+  PF22 = B21 .* fi21; tmp = B22 .* fi22; PF22 += tmp;
+  // dpsi/dtheta = -Pi : (What Ubar)
+  psth = Pi11 .* ub21; tmp = Pi12 .* ub22; psth += tmp; tmp = Pi21 .* ub11; psth -= tmp; tmp = Pi22 .* ub12; psth -= tmp;
+  // Mandel stress M = Ubar^T Pi
+  Mn11 = ub11 .* Pi11; tmp = ub21 .* Pi21; Mn11 += tmp;
+  Mn12 = ub11 .* Pi12; tmp = ub21 .* Pi22; Mn12 += tmp;
+  Mn21 = ub12 .* Pi11; tmp = ub22 .* Pi21; Mn21 += tmp;
+  Mn22 = ub12 .* Pi12; tmp = ub22 .* Pi22; Mn22 += tmp;
+  // quadratic energy with Hp = Fp - I (what the pointwise P2 operator integrates)
+  real[int] l11 = e11 - tf11; l11 += 1; real[int] l22 = e22 - tf22; l22 += 1;
+  real[int] l12 = hy1 + hx2; tmp = tf12 + tf21; l12 -= tmp; l12 *= 0.5;
+  real[int] wl = hx2 - hy1; tmp = tf21 - tf12; wl -= tmp; wl *= 0.5; wl -= thc;
+  real[int] q11 = C11 .* l11; tmp = C12 .* l22; q11 += tmp; tmp = C16 .* l12; tmp *= 2; q11 += tmp;
+  real[int] q22 = C12 .* l11; tmp = C22 .* l22; q22 += tmp; tmp = C26 .* l12; tmp *= 2; q22 += tmp;
+  real[int] q12 = C16 .* l11; tmp = C26 .* l22; q12 += tmp; tmp = C66 .* l12; tmp *= 2; q12 += tmp;
+  psiL = q11 .* l11; tmp = q22 .* l22; psiL += tmp; tmp = q12 .* l12; tmp *= 2; psiL += tmp; psiL *= 0.5;
+  tmp = wl .* wl; tmp *= 2*muc; psiL += tmp;
+  real[int] skl = wl; skl *= 2*muc;
+  PL11 = q11; PL22 = q22; PL12 = q12 - skl; PL21 = q12 + skl;
+  plth = wl; plth *= -4*muc;
+  dP11 = PF11 - PL11; dP12 = PF12 - PL12; dP21 = PF21 - PL21; dP22 = PF22 - PL22; dPth = psth - plth;
+  return 0;
+}
+// resolved shear stresses tau_a = M : s_a(x)n_a and the spin drive tau* = M : What, at the current increments
+func int taus() {
+  trialFp(); finiteStress();
+  ta = Mn11 .* A11a; tmp = Mn12 .* A12a; ta += tmp; tmp = Mn21 .* A21a; ta += tmp; tmp = Mn22 .* A22a; ta += tmp;
+  tb = Mn11 .* A11b; tmp = Mn12 .* A12b; tb += tmp; tmp = Mn21 .* A21b; tb += tmp; tmp = Mn22 .* A22b; tb += tmp;
+  tcc = Mn11 .* A11c; tmp = Mn12 .* A12c; tcc += tmp; tmp = Mn21 .* A21c; tcc += tmp; tmp = Mn22 .* A22c; tcc += tmp;
+  tstar = Mn21 - Mn12;
+  wloc = aa;
+  return 0;
+}
+// curvature-mode stresses nu_a = A (grad th - kp - sum dv s/l) . s_a / l   (F)
+func int nus() {
+  real[int] q1 = gt1, q2 = gt2;
+  q1 -= kp1; q2 -= kp2;
+  tmp = dva .* s1x; tmp2 = dvb .* s2x; tmp += tmp2; tmp2 = dvc .* s3x; tmp += tmp2; tmp *= 1./lmode; q1 -= tmp;
+  tmp = dva .* s1y; tmp2 = dvb .* s2y; tmp += tmp2; tmp2 = dvc .* s3y; tmp += tmp2; tmp *= 1./lmode; q2 -= tmp;
+  nua = q1 .* s1x; tmp = q2 .* s1y; nua += tmp; nua *= Acurv/lmode;
+  nub = q1 .* s2x; tmp = q2 .* s2y; nub += tmp; nub *= Acurv/lmode;
+  nuc = q1 .* s3x; tmp = q2 .* s3y; nuc += tmp; nuc *= Acurv/lmode;
+  return 0;
+}
+
+int nlocal = atoi(arg("-nlocal", "30"));   // per-element slip/spin Newton iterations
+int nref = atoi(arg("-nref", "10"));
+real[int] rn(nt), rnold(nt), bad(nt), good(nt), pda(nt), pdb(nt), pdc(nt);
+// per-element backtracking: where the residual grew, go halfway back and skip the Newton step
+func int backtrack(real[int] & xa0, real[int] & xb0, real[int] & xc0, int it) {
+  rn = abs(ra); tmp = abs(rb); rn += tmp; tmp = abs(rc); rn += tmp;
+  if (it == 0) { bad = 0; } else {
+    tmp = rn; tmp -= rnold; tmp2 = abs(tmp); tmp += tmp2; tmp2 *= 2; tmp2 += 1e-300; bad = tmp ./ tmp2;   // 1 where rn > rnold
+  }
+  good = one - bad;
+  return 0;
+}
+func int setHp() {
+  tmp = tf11; tmp -= 1; hp11[] = tmp; tmp = tf22; tmp -= 1; hp22[] = tmp;
+  tmp = tf12 + tf21; tmp *= 0.5; hp12[] = tmp; tmp = tf21 - tf12; tmp *= 0.5; omp[] = tmp;
+  return 0;
+}
+real locres = 0; int nlocit = 0;
+// -gndcurl 1 (2026-11-01; 0 = old |grad(theta - theta_R)|): GND from the Cermelli-Gurtin dislocation tensor G = Fp Curl Fp
+//   (finite deformation, independent of the orientation field and therefore of its crystal symmetry), rho_G = |G - G_R|/b,
+//   G_R = G at the end of the relaxation (the counterpart of theta_R; saved in <checkpoint>.gnd).
+int gndCurl = atoi(arg("-gndcurl", "0"));
+int gndPhi2 = atoi(arg("-gndphi2", "1"));   // A: 1 = rho_G weighted by phi^2 (original), 0 = rho_G = |grad(th - thR)|/b everywhere
+int diagon = atoi(arg("-diag", "0"));        // 1 = per-step worst-element log <out>_diag.csv
+int recovMode = atoi(arg("-recov", "0"));      // SSD recovery by sweeping: 0 = C_D|dphi| (original), 1 = Heaviside(dphi), 2 = Heaviside(dphi)*tanh(C_A^2|grad theta_t|^2) (Ask 2019)
+real CA = atof(arg("-ca", "3.16227766"));      // um, C_A of Ask et al. 2019 (Table 3: sqrt(10) um)
+Ph xcen = x, ycen = y;
+real[int] gt0x(nt), gt0y(nt);   // gradient of the (non-symmetric) smoothed initial orientation th0s
+{ Ph g0x = dx(th0s), g0y = dy(th0s); gt0x = g0x[]; gt0y = g0y[]; }
+// symmetric orientation gradient: P1 vertex dofs and the inverse element Jacobian (grad = J^-1 [d1, d2] with d_k = theta_k - theta_0)
+int[int] sv0(nt), sv1(nt), sv2(nt); real[int] jgA(nt), jgB(nt), jgC(nt), jgD(nt), gsx(nt), gsy(nt);
+for (int k = 0; k < nt; k++) {
+  sv0[k] = Vh1(k, 0); sv1[k] = Vh1(k, 1); sv2[k] = Vh1(k, 2);
+  real x0 = Th[k][0].x, y0 = Th[k][0].y, xa1 = Th[k][1].x - x0, ya1 = Th[k][1].y - y0, xa2 = Th[k][2].x - x0, ya2 = Th[k][2].y - y0;
+  real dj = xa1*ya2 - ya1*xa2;
+  jgA[k] = ya2/dj; jgB[k] = -ya1/dj; jgC[k] = -xa2/dj; jgD[k] = xa1/dj;
+}
+// element gradient of theta_t: old = dx(th0s + th); -symfold 1 = minimal-gradient lift of theta0sym + th modulo symP
+Vh1 zA, zB;                                   // -symfold 2: nodal cos(n theta_s), sin(n theta_s)
+real[int] gax(nt), gay(nt), gbx(nt), gby(nt), gex(nt), gey(nt);   // element gradients of zA, zB; effective grad theta (output)
+func int symGrad() {
+  if (symFold == 2) {
+    Vh1 tts = th0sym + th; if (kwcField) tts = thk;   // -kwcfield: the KWC terms see vartheta
+    zA = cos(symN*tts); zB = sin(symN*tts);
+    real[int] an = zA[], bnn = zB[];
+    real[int] a0 = an(sv0), a1 = an(sv1), a2 = an(sv2); a1 -= a0; a2 -= a0;
+    real[int] b0 = bnn(sv0), b1 = bnn(sv1), b2 = bnn(sv2); b1 -= b0; b2 -= b0;
+    gax = jgA .* a1; tmp = jgB .* a2; gax += tmp; gay = jgC .* a1; tmp = jgD .* a2; gay += tmp;
+    gbx = jgA .* b1; tmp = jgB .* b2; gbx += tmp; gby = jgC .* b1; tmp = jgD .* b2; gby += tmp;
+    real[int] q = gax .* gax; tmp = gay .* gay; q += tmp; tmp = gbx .* gbx; q += tmp; tmp = gby .* gby; q += tmp; q = sqrt(q); q *= 1./symN;
+    gsx = q; gsy = 0; GSX[] = gsx; GSY[] = gsy;    // magnitude-only uses (energy, phase field, recovery, diag)
+    Ph am = zA, bm = zB;                           // element means of z
+    gex = am[] .* gbx; tmp = bm[] .* gax; gex -= tmp; gex *= 1./symN;   // (a grad b - b grad a)/n = grad theta for smooth fields
+    gey = am[] .* gby; tmp = bm[] .* gay; gey -= tmp; gey *= 1./symN;
+    return 0;
+  }
+  if (!symFold) { gsx = gt0x + gt1; gsy = gt0y + gt2; GSX[] = gsx; GSY[] = gsy; return 0; }
+  Vh1 tts = th0sym + th; if (kwcField) tts = thk;   // -kwcfield: the KWC terms see grad vartheta
+  real[int] tn = tts[];
+  real[int] t0 = tn(sv0), d1 = tn(sv1), d2 = tn(sv2); d1 -= t0; d2 -= t0;
+  for [i, v : d1] v -= symP*floor(v/symP + 0.5);
+  for [i, v : d2] v -= symP*floor(v/symP + 0.5);
+  real[int] bx(nt), by(nt), bn(nt), cx(nt), cy(nt), cn(nt), msk(nt), e1(nt), e2(nt);
+  bx = jgA .* d1; tmp = jgB .* d2; bx += tmp;                 // baseline: the pre-folded differences (lift m = 0)
+  by = jgC .* d1; tmp = jgD .* d2; by += tmp;
+  bn = bx .* bx; tmp = by .* by; bn += tmp;
+  for (int m1 = -1; m1 <= 1; m1++) for (int m2 = -1; m2 <= 1; m2++) {
+    if (m1 == 0 && m2 == 0) continue;
+    e1 = d1; e1 += m1*symP; e2 = d2; e2 += m2*symP;
+    cx = jgA .* e1; tmp = jgB .* e2; cx += tmp;
+    cy = jgC .* e1; tmp = jgD .* e2; cy += tmp;
+    cn = cx .* cx; tmp = cy .* cy; cn += tmp;
+    tmp = bn; tmp *= (1 - 1e-12); tmp = cn - tmp; msk = abs(tmp); msk += 1e-300; msk = tmp ./ msk; msk *= -0.5; msk += 0.5;   // 1 where strictly smaller
+    for [i, v : msk] v = (v > 0.75 ? 1. : 0.);
+    tmp = cx - bx; tmp = tmp .* msk; bx += tmp; tmp = cy - by; tmp = tmp .* msk; by += tmp;
+    tmp = msk; tmp *= -1; tmp += 1; bn = bn .* tmp; tmp = cn .* msk; bn += tmp;   // assignment form (no cancellation)
+  }
+  gsx = bx; gsy = by; GSX[] = gsx; GSY[] = gsy;
+  return 0;
+}
+func int kin() {   // centroid (= element-mean) kinematics of the current u, theta
+  E11 = dx(u1); E22 = dy(u2); E12 = 0.5*(dy(u1) + dx(u2)); WU = 0.5*(dx(u2) - dy(u1)); TH = th;
+  Hy1 = dy(u1); Hx2 = dx(u2);
+  GT1 = dx(th); GT2 = dy(th);
+  e11 = E11[]; e22 = E22[]; e12 = E12[]; wu = WU[]; thc = TH[]; gt1 = GT1[]; gt2 = GT2[]; hy1 = Hy1[]; hx2 = Hx2[];
+  if (isA) symGrad();
+  return 0;
+}
+// ---- fully consistent tangent and coupled local Newton (2026-10-31) ----
+// -tangent consistent (variant A): element stress s = (P11, P12, P21, P22, dpsi/dtheta) and driving forces
+// tau = (tau_1, tau_2, tau_3, tau*) are algebraic functions of the element-mean kinematics k = (F11-1, F12, F21, F22-1, theta)
+// and the local increments q = (dgamma_1..3, dw*).  Their partial derivatives are taken by central differences of that
+// algebraic map (no local solve inside: accurate to ~h^2), the local equations r(q; k) = 0 are differentiated implicitly,
+// dq/dk = -(dr/dq)^{-1} dr/dk, and the element tangent ds/dk|_total enters the global matrix through the element-mean
+// gradient operators.  The same exact 4x4 local Jacobian polishes the local solve (coupled slip + spin Newton).
+real[int,int] DSF(nt, 45), DSL(nt, 25), DTQ(nt, 36), JJ(nt, 16), BB(nt, 24), DCT(nt, 25);
+real[int,int] DA(nt, 9), DSFl(nt, 5), DTQl(nt, 4);   // -mucdual 1: da/d(inputs 0-8), d(stress)/d lambda, d(tau)/d lambda
+real lastPolishRes = 0; real[int] rwl(nt);
+// in-place Gaussian elimination of nt independent 4x4 systems JJ X = BB (m right-hand sides); BB becomes X
+func int solve4(int m) {
+  for (int p = 0; p < 4; p++) {
+    real[int] piv = JJ(:, p*4+p);
+    for (int r = p+1; r < 4; r++) {
+      real[int] f = JJ(:, r*4+p); f = f ./ piv;
+      for (int c = p+1; c < 4; c++) { real[int] t1 = JJ(:, p*4+c); t1 = t1 .* f; real[int] t2 = JJ(:, r*4+c); t2 -= t1; JJ(:, r*4+c) = t2; }
+      for (int j = 0; j < m; j++) { real[int] t1 = BB(:, p*m+j); t1 = t1 .* f; real[int] t2 = BB(:, r*m+j); t2 -= t1; BB(:, r*m+j) = t2; }
+    }
+  }
+  for (int r = 3; r >= 0; r--) {
+    real[int] piv = JJ(:, r*4+r);
+    for (int j = 0; j < m; j++) {
+      real[int] acc = BB(:, r*m+j);
+      for (int c = r+1; c < 4; c++) { real[int] t1 = JJ(:, r*4+c); real[int] t2 = BB(:, c*m+j); t1 = t1 .* t2; acc -= t1; }
+      acc = acc ./ piv; BB(:, r*m+j) = acc;
+    }
+  }
+  return 0;
+}
+// perturb input j of the element map: 0 F11, 1 F12 (= du1/dy), 2 F21 (= du2/dx), 3 F22, 4 theta, 5-7 dgamma_1..3, 8 dw*
+func int addIn(int j, real h) {
+  if (j == 0) e11 += h; if (j == 1) hy1 += h; if (j == 2) hx2 += h; if (j == 3) e22 += h; if (j == 4) thc += h;
+  if (j == 5) dpa += h; if (j == 6) dpb += h; if (j == 7) dpc += h; if (j == 8) dwst += h;
+  return 0;
+}
+// output i of the element map: 0-4 finite-strain stress (P11, P12, P21, P22, dpsi/dtheta), 5-9 quadratic-energy stress, 10-13 tau_1..3, tau*
+func int outI(int i, real[int] & o) {
+  if (i == 0) o = PF11; if (i == 1) o = PF12; if (i == 2) o = PF21; if (i == 3) o = PF22; if (i == 4) o = psth;
+  if (i == 5) o = PL11; if (i == 6) o = PL12; if (i == 7) o = PL21; if (i == 8) o = PL22; if (i == 9) o = plth;
+  if (i == 10) o = ta; if (i == 11) o = tb; if (i == 12) o = tcc; if (i == 13) o = tstar;
+  return 0;
+}
+// central differences of the element map w.r.t. inputs j0..j1 (fills DSF, DSL for k-inputs, DTQ); restores the base state
+func int fdMap(int j0, int j1) {
+  real[int] op(nt), om(nt), d(nt);
+  for (int j = j0; j <= j1; j++) {
+    real h = (j < 5) ? fdK : fdQ;
+    real[int,int] Sp(nt, 14), Sm(nt, 14);
+    real[int] ap(nt), am(nt);
+    addIn(j, h); taus(); for (int i = 0; i < 14; i++) { outI(i, op); Sp(:, i) = op; } ap = aa;
+    addIn(j, -2*h); taus(); for (int i = 0; i < 14; i++) { outI(i, om); Sm(:, i) = om; } am = aa;
+    addIn(j, h);
+    if (mucDual == 1) { d = ap - am; d *= 0.5/h; DA(:, j) = d; }
+    for (int i = 0; i < 14; i++) {
+      op = Sp(:, i); om = Sm(:, i); d = op - om; d *= 0.5/h;
+      if (i < 5) DSF(:, i*9 + j) = d;
+      else if (i < 10) { if (j < 5) DSL(:, (i-5)*5 + j) = d; }
+      else DTQ(:, (i-10)*9 + j) = d;
+    }
+  }
+  taus();
+  return 0;
+}
+// -mucdual 1: central differences w.r.t. the multiplier lambda (stresses and driving forces; a does not depend on lambda directly)
+func int fdLam() {
+  real h = 1e-6; real[int] op(nt), om(nt), d(nt);
+  real[int,int] Sp(nt, 14), Sm(nt, 14);
+  lamS += h; taus(); for (int i = 0; i < 14; i++) { outI(i, op); Sp(:, i) = op; }
+  lamS -= 2*h; taus(); for (int i = 0; i < 14; i++) { outI(i, om); Sm(:, i) = om; }
+  lamS += h;
+  for (int i = 0; i < 5; i++) { op = Sp(:, i); om = Sm(:, i); d = op - om; d *= 0.5/h; DSFl(:, i) = d; }
+  for (int i = 0; i < 4; i++) { op = Sp(:, 10 + i); om = Sm(:, 10 + i); d = op - om; d *= 0.5/h; DTQl(:, i) = d; }
+  taus();
+  return 0;
+}
+// exact local Jacobian dr/dq (4x4) at the current state: rows r_a = dgamma_a - dt sgn(tau_a) g_a(|tau_a|), r_w = dw* - kspin tau*
+func int buildJqq() {
+  for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
+    real[int] col = DTQ(:, a*9 + 5 + b);
+    if (a == 0) { col = col .* dga; col *= -dt; } else if (a == 1) { col = col .* dgb; col *= -dt; } else if (a == 2) { col = col .* dgc; col *= -dt; } else { col = col .* kspin; col *= -1; }
+    if (a == b) col += 1;
+    JJ(:, a*4 + b) = col;
+  }
+  return 0;
+}
+// coupled slip + spin Newton polish with the exact Jacobian (per element, residual-decrease safeguard)
+func int localRes(real[int] & rn) {   // local residuals ra, rb, rc, rw at the current q; rn = sum of |r| per element
+  real[int] sa(nt), sb(nt), sc(nt);
+  taus(); flow(ta, fs1, ga, dga, eEa, 1); flow(tb, fs2, gb, dgb, eEb, 1); flow(tcc, fs3, gc, dgc, eEc, 1);
+  sgn(ta, sa); sgn(tb, sb); sgn(tcc, sc);
+  ra = sa .* ga; ra *= -dt; ra += dpa; rb = sb .* gb; rb *= -dt; rb += dpb; rc = sc .* gc; rc *= -dt; rc += dpc;
+  rwl = kspin .* tstar; rwl *= -1; rwl += dwst;
+  rn = abs(ra); tmp = abs(rb); rn += tmp; tmp = abs(rc); rn += tmp; tmp = abs(rwl); rn += tmp;
+  return 0;
+}
+// coupled slip + spin Newton with the exact local Jacobian; per-element backtracking (1, 1/2, 1/4, 1/8), else keep the old q
+func int polishLocal() {
+  real[int] rn0(nt), rn1(nt), qa(nt), qb(nt), qc(nt), qw(nt), ok(nt), pend(nt), acc(nt), da(nt), db(nt), dc(nt), dw(nt);
+  for (int ip = 0; ip < nPolish; ip++) {
+    localRes(rn0);
+    real prevRes = lastPolishRes; lastPolishRes = rn0.max;
+    if (lastPolishRes < 1e-14) break;                                  // |r| in increment units (~1e-10 relative)
+    if (ip > 0 && lastPolishRes > 0.5*prevRes) break;                  // no longer contracting: round-off floor
+    fdMap(5, 8); buildJqq();
+    tmp = -ra; BB(:, 0) = tmp; tmp = -rb; BB(:, 1) = tmp; tmp = -rc; BB(:, 2) = tmp; tmp = -rwl; BB(:, 3) = tmp;
+    solve4(1);
+    da = BB(:, 0); db = BB(:, 1); dc = BB(:, 2); dw = BB(:, 3);
+    qa = dpa; qb = dpb; qc = dpc; qw = dwst;
+    pend = one; acc = 0;
+    real w = 1;
+    for (int ls = 0; ls < 4; ls++) {
+      // trial q = q_old + w delta on the pending elements (accepted ones keep their accepted value)
+      tmp = da; tmp *= w; tmp += qa; tmp = tmp .* pend; tmp2 = dpa .* acc; dpa = tmp + tmp2;
+      tmp = db; tmp *= w; tmp += qb; tmp = tmp .* pend; tmp2 = dpb .* acc; dpb = tmp + tmp2;
+      tmp = dc; tmp *= w; tmp += qc; tmp = tmp .* pend; tmp2 = dpc .* acc; dpc = tmp + tmp2;
+      tmp = dw; tmp *= w; tmp += qw; tmp = tmp .* pend; tmp2 = dwst .* acc; dwst = tmp + tmp2;
+      if (spinCap > 0) { real[int] smx(nt); smx = spinCap; clampv(dwst, smx); }   // principal branch also in the polish
+      localRes(rn1);
+      tmp = rn0 - rn1; tmp2 = abs(tmp); tmp += tmp2; tmp2 *= 2; tmp2 += 1e-300; ok = tmp ./ tmp2;   // 1 where the residual decreased
+      ok = ok .* pend; acc += ok; pend -= ok;
+      if (pend.max < 0.5) break;
+      w *= 0.5;
+    }
+    // still pending: back to the old increments
+    tmp = dpa .* acc; tmp2 = qa .* pend; dpa = tmp + tmp2; tmp = dpb .* acc; tmp2 = qb .* pend; dpb = tmp + tmp2;
+    tmp = dpc .* acc; tmp2 = qc .* pend; dpc = tmp + tmp2; tmp = dwst .* acc; tmp2 = qw .* pend; dwst = tmp + tmp2;
+  }
+  return 0;
+}
+func int localUpdate() {
+  kin();
+  real[int] sa(nt), sb(nt), sc(nt);
+  // --- slip ---
+  real rsp = 0;
+  for (int it = 0; it < nlocal; it++) {
+    taus();
+    if (isA) {   // GB spin: Newton step on  dw* - dt tau*/eta_s = 0,  d tau*/d dw* ~ -4 mu_c
+      tmp = tstar .* kspin; tmp -= dwst; rsp = tmp.linfty; tmp2 = kspin; tmp2 *= 4*muc; tmp2 += 1; tmp = tmp ./ tmp2;
+      if (spinCap > 0) { real[int] dold = dwst; dwst += tmp; real[int] smx(nt); smx = spinCap; clampv(dwst, smx); tmp = dwst - dold; }   // -spinmax / -spinbranch: |dw*| <= cap per step
+      else dwst += tmp;
+      tmp *= 2*muc; ta += tmp; tb += tmp; tcc += tmp;   // first-order update of tau_a for the new spin (d tau_a/d w* = 2 mu_c)
+    }
+    flow(ta, fs1, ga, dga, eEa, 1); flow(tb, fs2, gb, dgb, eEb, 1); flow(tcc, fs3, gc, dgc, eEc, 1);
+    sgn(ta, sa); sgn(tb, sb); sgn(tcc, sc);
+    ra = sa .* ga; ra *= -dt; ra += dpa;
+    rb = sb .* gb; rb *= -dt; rb += dpb;
+    rc = sc .* gc; rc *= -dt; rc += dpc;
+    backtrack(dpa, dpb, dpc, it);
+    locres = max(ra.linfty, rb.linfty, rc.linfty, rsp);
+    if (it > 0) {   // bad elements: halve the last step
+      tmp = dpa - pda; tmp *= 0.5; tmp = tmp .* bad; dpa -= tmp;
+      tmp = dpb - pdb; tmp *= 0.5; tmp = tmp .* bad; dpb -= tmp;
+      tmp = dpc - pdc; tmp *= 0.5; tmp = tmp .* bad; dpc -= tmp;
+    }
+    tmp = rn .* good; tmp2 = rnold .* bad; rnold = tmp + tmp2;
+    tmp = dpa .* good; tmp2 = pda .* bad; pda = tmp + tmp2;
+    tmp = dpb .* good; tmp2 = pdb .* bad; pdb = tmp + tmp2;
+    tmp = dpc .* good; tmp2 = pdc .* bad; pdc = tmp + tmp2;
+    solve3(Gx11, Gx22, Gx33, Gx12, Gx13, Gx23);
+    da = da .* good; db = db .* good; dc = dc .* good;
+    if (verbose > 1) { int im = ra.imax; real[int] q = abs(ra); im = q.imax;
+      cout << "    loc " << it << " el " << im << " ra " << ra[im] << " dpa " << dpa[im] << " ta " << ta[im] << " tb " << tb[im] << " tc " << tcc[im]
+           << " ga " << ga[im] << " dga " << dga[im] << " da " << da[im] << " db " << db[im] << " dc " << dc[im] << " det " << det[im] << " tauc " << tauc[im] << " etad " << etad[im] << endl; }
+    dpa += da; dpb += db; dpc += dc;
+    // drag-limited bound
+    dragBound(ta, eEa); clampv(dpa, dpmax);
+    dragBound(tb, eEb); clampv(dpb, dpmax);
+    dragBound(tcc, eEc); clampv(dpc, dpmax);
+    nlocit = it + 1;
+    if (locres < 1e-13) break;
+  }
+  // --- plastic curvature (F) ---
+  if (!isA) {
+    for (int it = 0; it < nlocal; it++) {
+      nus();
+      flow(nua, fs1, ga, dga, eEa, 0); flow(nub, fs2, gb, dgb, eEb, 0); flow(nuc, fs3, gc, dgc, eEc, 0);
+      sgn(nua, sa); sgn(nub, sb); sgn(nuc, sc);
+      ra = sa .* ga; ra *= -dt; ra += dva;
+      rb = sb .* gb; rb *= -dt; rb += dvb;
+      rc = sc .* gc; rc *= -dt; rc += dvc;
+      solve3(K11, K22, K33, K12, K13, K23);
+      dva += da; dvb += db; dvc += dc;
+      dpmax = abs(nua); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dva, dpmax);
+      dpmax = abs(nub); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dvb, dpmax);
+      dpmax = abs(nuc); dpmax = dpmax ./ etad; dpmax *= 2*dt; dpmax += 1e-12; clampv(dvc, dpmax);
+      if (max(ra.linfty, rb.linfty, rc.linfty) < 1e-12) break;
+    }
+  }
+  if (tanMode == 1) polishLocal();
+  // --- plastic fields for assembly: Hp = Fp_trial - I, and the finite-strain correction at this state ---
+  taus(); setHp();
+  if (!isA) {
+    real[int] q1 = kp1, q2 = kp2;
+    tmp = dva .* s1x; tmp2 = dvb .* s2x; tmp += tmp2; tmp2 = dvc .* s3x; tmp += tmp2; tmp *= 1./lmode; q1 += tmp;
+    tmp = dva .* s1y; tmp2 = dvb .* s2y; tmp += tmp2; tmp2 = dvc .* s3y; tmp += tmp2; tmp *= 1./lmode; q2 += tmp;
+    kq1[] = q1; kq2[] = q2;
+  }
+  return 0;
+}
+
+// strength and drag from state at start of step
+func int strength() {
+  Tc = T; Tcel = Tc[];
+  real[int] rt = rhoS + rhoG;
+  tmp = rt; tauc = sqrt(tmp); tauc *= lamT*mu*b; tauc += tau0;
+  tmp = Tcel; tmp -= T0; tmp *= -alphaMu; tmp += 1; for [i, v : tmp] v = max(v, softMin); tauc = tauc .* tmp;   // tau_c > 0 (Clausius-Duhem: tau dgamma >= 0 needs a positive strength)
+  // mobile density for the drag (see -dragrho)
+  if (dragRho == 0) rhoMob = rt;
+  else if (dragRho == 1) rhoMob = rhoS;
+  else if (dragRho == 2) { rhoMob = Tcel; rhoMob *= 2*kB/(c1MR*c2MR*c3MR*mu*b*b*b); rhoMob = rhoMob .* rt; }   // c_MR T sqrt(rho_P rho_F), rho_P = rho_F = rt
+  else { rhoMob = rhoM; for [i, v : rhoMob] v = min(v, rt[i]); }
+  for [i, v : rhoMob] v = max(v, 1e-3);
+  etad = Tcel; etad *= B0/T0; tmp = rhoMob; tmp *= b*b; etad = etad ./ tmp;
+  gcrit = rhoMob; gcrit *= b*max(vcrel, 1e-30);   // relativistic rate limit rho_m b v_c (1/ns)
+  // GB spin friction eta_s = 2 eta*_0/(1-phi)^2:  dw* = dt tau*/eta_s;  k = 4 mu_c/eta_s;  beta = dt k/(1 + dt k)
+  if (isA) { PHc = phi; real[int] kk = one - PHc[]; kk = kk .* kk; kspin = kk; kspin *= dt/(2*etaStar0);
+             kk *= 2*muc*dt/etaStar0; tmp = kk; tmp += 1; betaS = kk ./ tmp; }
+  omb = one - betaS;
+  tmp = betaS; tmp *= muc;
+  Gx11 = G11 - tmp; Gx22 = G22 - tmp; Gx33 = G33 - tmp; Gx12 = G12 - tmp; Gx13 = G13 - tmp; Gx23 = G23 - tmp;
+  return 0;
+}
+
+// ---------------- state vectors and energies ---------------------------
+real[int] U(Wh.ndof), V(Wh.ndof), Acc(Wh.ndof), Un(Wh.ndof), rhs(Wh.ndof), rin(Wh.ndof), Uold(Wh.ndof);
+U = 0; V = 0; Acc = 0;
+func int plasticRHS() {
+  rhs = Fun; rhs *= Tload;
+  rpl = B1*hp11[]; rhs += rpl; rpl = B2*hp22[]; rhs += rpl; rpl = B3*hp12[]; rhs += rpl; rpl = Bw*omp[]; rhs += rpl;
+  if (!isA) { rpl = Bk1*kq1[]; rhs += rpl; rpl = Bk2*kq2[]; rhs += rpl; }
+  return 0;
+}
+varf vBCm([u1,u2,th],[v1,v2,ze]) = on(LBa, u1 = 1) + on(LBb, u2 = 1) + on(LBc, u2 = 1) + on(LBd, u2 = 1) + on(LBe, u1 = 1) + on(LBf, u2 = 1);
+varf vBCpist([u1,u2,th],[v1,v2,ze]) = on(LBe, u1 = 1);          // dofs of the piston edge (right, u_x); LBe=9999 unless piston mode
+real[int] pistm = vBCpist(0, Wh, tgv = 1);
+real[int] pistk(Wh.ndof); pistk = 1; pistk -= pistm;
+varf vBCpistT([u1,u2,th],[v1,v2,ze]) = on(LBf, u2 = 1);        // dofs of the shear plate (right, u_y); LBf=9999 unless shearpiston
+real[int] pistmT = vBCpistT(0, Wh, tgv = 1);
+varf vBCconf([u1,u2,th],[v1,v2,ze]) = on(LBc, u2 = 1) + on(LBd, u2 = 1);   // roller dofs (u_y on top and bottom): must be exactly 0, not frozen at the relaxed-state value
+real[int] confm = vBCconf(0, Wh, tgv = 1);
+real[int] confk(Wh.ndof); confk = 1; confk -= confm;
+func real pistonDisp(real tt) {   // piston travel d(t) (um): integral of u_p e(t), e = quintic ramp up, hold, ramp down
+  real s, r = 0;
+  if (tt <= 0) return 0.;
+  if (tt < pistTr) { s = tt/pistTr; return pistUp*pistTr*(s^6 - 3*s^5 + 2.5*s^4); }
+  if (tt < pistTr + pistTh) return pistUp*(0.5*pistTr + (tt - pistTr));
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return pistUp*(0.5*pistTr + pistTh + pistTr*(s - (s^6 - 3*s^5 + 2.5*s^4))); }
+  return pistUp*(pistTr + pistTh);
+}
+real[int] bcm = vBCm(0, Wh, tgv = 1);
+real[int] mask(Wh.ndof); mask = 1; mask -= bcm;
+if (mucDual == 1) DmB = mask;
+// -bckin 1 (2026-10-31; 0 = old): the prescribed dofs (piston face u_x, rollers u_y, wall u_x) carry their exact prescribed velocity and
+//   acceleration instead of the Newmark recursion.  On a dof whose displacement is prescribed, a_{n+1} = c0 (U-Un) - c1 v_n - a_n with
+//   U - Un = 0 makes v flip sign every step and a grow linearly (4|v|/dt per step); through the consistent mass these dofs then drive
+//   their free neighbours with a growing alternating force (50 m/s: |a| = 4.6e3 um/ns^2 at 6.2 ns -> kink at the piston face, Newton diverged).
+int bcKin = atoi(arg("-bckin", "0"));
+string predName = arg("-predictor", "avg");
+func real pistonVel(real tt) {   // d/dt pistonDisp = u_p e(t)
+  real s;
+  if (tt <= 0) return 0.;
+  if (tt < pistTr) { s = tt/pistTr; return pistUp*(6*s^5 - 15*s^4 + 10*s^3); }
+  if (tt < pistTr + pistTh) return pistUp;
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return pistUp*(1 - (6*s^5 - 15*s^4 + 10*s^3)); }
+  return 0.;
+}
+func real pistonAcc(real tt) {
+  real s;
+  if (tt <= 0) return 0.;
+  if (tt < pistTr) { s = tt/pistTr; return pistUp/pistTr*(30*s^4 - 60*s^3 + 30*s^2); }
+  if (tt < pistTr + pistTh) return 0.;
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return -pistUp/pistTr*(30*s^4 - 60*s^3 + 30*s^2); }
+  return 0.;
+}
+func real pistonDispU(real tt, real v) { real s; if (tt <= 0) return 0.;   // pistonDisp for plate speed v
+  if (tt < pistTr) { s = tt/pistTr; return v*pistTr*(s^6 - 3*s^5 + 2.5*s^4); }
+  if (tt < pistTr + pistTh) return v*(0.5*pistTr + (tt - pistTr));
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return v*(0.5*pistTr + pistTh + pistTr*(s - (s^6 - 3*s^5 + 2.5*s^4))); }
+  return v*(pistTr + pistTh); }
+func real pistonVelU(real tt, real v) { real s; if (tt <= 0) return 0.;
+  if (tt < pistTr) { s = tt/pistTr; return v*(6*s^5 - 15*s^4 + 10*s^3); }
+  if (tt < pistTr + pistTh) return v;
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return v*(1 - (6*s^5 - 15*s^4 + 10*s^3)); }
+  return 0.; }
+func real pistonAccU(real tt, real v) { real s; if (tt <= 0) return 0.;
+  if (tt < pistTr) { s = tt/pistTr; return v/pistTr*(30*s^4 - 60*s^3 + 30*s^2); }
+  if (tt < pistTr + pistTh) return 0.;
+  if (tt < 2*pistTr + pistTh) { s = (tt - pistTr - pistTh)/pistTr; return -v/pistTr*(30*s^4 - 60*s^3 + 30*s^2); }
+  return 0.; }
+func int fixBCkin(real tt) {   // V, Acc on the prescribed dofs := exact (piston: -v_p, -a_p in x; every other prescribed dof: 0)
+  V = V .* mask; Acc = Acc .* mask;
+  if (isP) { real[int] q = pistm; q *= -pistonVel(tt); V += q; q = pistm; q *= -pistonAcc(tt); Acc += q; }
+  if (isSP) { real[int] q = pistmT; q *= pistonVelU(tt, pistUt); V += q; q = pistmT; q *= pistonAccU(tt, pistUt); Acc += q; }
+  return 0;
+}
+// KWC couple stress from element-mean phi^2 (consistent with the energy)
+real[int] ph2m(nt), gm(nt), mxk(nt), myk(nt), areas(nt);
+{ varf va(un, w) = int2d(Th)(w); areas = va(0, Ph); }
+varf vph2(un, w) = int2d(Th)(phi^2*w);
+varf vgph(un, w) = int2d(Th)(gphi*w);
+// element means of phi^2 (GND weighting) and of the log coupling g(phi) (KWC couple stress)
+func int updatePhi2() { ph2m = vph2(0, Ph); ph2m = ph2m ./ areas; gm = vgph(0, Ph); gm = gm ./ areas; return 0; }
+real[int] facz(nt);   // dpsi/dq / q of the KWC orientation terms (all modes)
+func int kwcStress() {
+  real[int] gx = gsx; real[int] gy = gsy;
+  real[int] nr = gx .* gx; tmp = gy .* gy; nr += tmp; nr += dlt*dlt; nr = sqrt(nr);
+  real[int] fac = gm ./ nr;
+  if (kwcReg == 1) { real[int] q = gx .* gx; tmp = gy .* gy; q += tmp; q = sqrt(q); real[int] fq(q.n), cq(q.n); kgFac(q, fq, cq); fac = gm .* fq; }
+  fac *= sK; fac += eK*eK; fac *= f0; facz = fac;
+  if (symFold == 2) { mxk = fac .* gex; myk = fac .* gey; }   // couple stress for output (the residual uses kwcResZ)
+  else { mxk = fac .* gx; myk = fac .* gy; }
+  return 0;
+}
+// -symfold 2 residual: r_k = sum_e A_e (fac/n) (-b_k grad a_h + a_k grad b_h).grad N_k  -> into rpl (Wh)
+Wh [zw1, zw2, zwA], [zv1, zv2, zwB];   // Wh vectors carrying a (resp. b) at the theta dofs
+func int zWeights() { [zw1, zw2, zwA] = [0, 0, zA]; [zv1, zv2, zwB] = [0, 0, zB]; return 0; }
+func int kwcResZ() {
+  zWeights();
+  real[int] t1 = facz .* gax, t2 = facz .* gay, t3 = facz .* gbx, t4 = facz .* gby;
+  real[int] ra1 = Bg1*t1, w1 = Bg2*t2; ra1 += w1;   // int fac grad a . grad N
+  real[int] rb1 = Bg1*t3; w1 = Bg2*t4; rb1 += w1;   // int fac grad b . grad N
+  ra1 = ra1 .* zv1[]; rb1 = rb1 .* zw1[]; rpl = rb1 - ra1; rpl *= 1./symN;
+  return 0;
+}
+func real kwcPhi() {   // -kwcfield: incremental functional of the vartheta step at the current thk (thkn, thc1 fixed)
+  symGrad();
+  return int2d(Th)( 0.5*kwcTau/dt*(thk - thkn)^2 + f0*(sK*gphi*(sqrt(gtx^2+gty^2+dlt^2) - dlt) + 0.5*eK^2*(gtx^2+gty^2))
+                    + kwcKap*phi^kwcP*(1 - cos(symN*(th0sym + thc1 - thk)))/(symN*symN) );
+}
+real[int] rcL(nt), lamBase(nt), dLam(nt); rcL = 0;   // -mucdual 1: constraint residual -2 sc a A_e, line-search base, correction
+func int residual() {
+  if (mucDual == 1) { rcL = aa .* areas; rcL *= -2*dualSc; }
+  plasticRHS(); rhs += rin;
+  rpl = Mall*U; rpl *= c0; rhs -= rpl;
+  rpl = Ktrue*U; rhs -= rpl;
+  rpl = BC11*dP11; rhs -= rpl; rpl = BC12*dP12; rhs -= rpl; rpl = BC21*dP21; rhs -= rpl; rpl = BC22*dP22; rhs -= rpl;
+  rpl = BCth*dPth; rhs -= rpl;
+  if (isA && !kwcField) { kwcStress(); if (symFold == 2) { kwcResZ(); rhs -= rpl; } else { rpl = Bg1*mxk; rhs -= rpl; rpl = Bg2*myk; rhs -= rpl; } }
+  if (kwcField && !kwcOneWay) { u1[] = U; thc1 = th; rpl = vKCr(0, Wh); rhs -= rpl; }   // penalty torque on the lattice (replaces the couple stress)
+  rhs = rhs .* mask;
+  return 0;
+}
+// ---- consistent element-mean tangent of slip (and GB spin) ----
+varf vR1([u1,u2,th],[q]) = int2d(Th)(dx(u1)*q);
+varf vR2([u1,u2,th],[q]) = int2d(Th)(dy(u2)*q);
+varf vR3([u1,u2,th],[q]) = int2d(Th)((dy(u1)+dx(u2))*q);
+varf vR4([u1,u2,th],[q]) = int2d(Th)((rotv(u1,u2) - th)*q);
+matrix Rk1 = vR1(Wh, Ph), Rk2 = vR2(Wh, Ph), Rk3 = vR3(Wh, Ph), Rk4 = vR4(Wh, Ph);
+matrix Rk = [[Rk1],[Rk2],[Rk3],[Rk4]];
+matrix RkT = Rk';
+// element-mean kinematics operators (rows carry the element area): k = (du1/dx, du1/dy, du2/dx, du2/dy, theta)
+varf vKk1([u1,u2,th],[q]) = int2d(Th)(dx(u1)*q);
+varf vKk2([u1,u2,th],[q]) = int2d(Th)(dy(u1)*q);
+varf vKk3([u1,u2,th],[q]) = int2d(Th)(dx(u2)*q);
+varf vKk4([u1,u2,th],[q]) = int2d(Th)(dy(u2)*q);
+varf vKk5([u1,u2,th],[q]) = int2d(Th)(th*q);
+matrix Kk1 = vKk1(Wh, Ph), Kk2 = vKk2(Wh, Ph), Kk3 = vKk3(Wh, Ph), Kk4 = vKk4(Wh, Ph), Kk5 = vKk5(Wh, Ph);
+matrix Kk = [[Kk1],[Kk2],[Kk3],[Kk4],[Kk5]];
+matrix KkT = Kk';
+// consistent element tangent: D_tot = ds_F/dk + ds_F/dq dq/dk (implicit local response), minus the quadratic-energy element-mean
+// stiffness ds_L/dk|q that the pointwise linear operator already contains; assembled as Kk' diag(D/A) Kk
+func int consistentTangent() {
+  taus(); flow(ta, fs1, ga, dga, eEa, 1); flow(tb, fs2, gb, dgb, eEb, 1); flow(tcc, fs3, gc, dgc, eEc, 1);
+  real tf0 = clock(); fdMap(0, 8); if (mucDual == 1) fdLam(); tTanFD += clock() - tf0;
+  buildJqq();
+  int mm = (mucDual == 1) ? 6 : 5;   // right-hand sides: the 5 kinematic inputs (+ lambda)
+  for (int a = 0; a < 4; a++) for (int j = 0; j < mm; j++) {   // right-hand side -dr/dk (-dr/dlambda)
+    real[int] col(nt); if (j < 5) col = DTQ(:, a*9 + j); else col = DTQl(:, a);
+    if (a == 0) { col = col .* dga; col *= dt; } else if (a == 1) { col = col .* dgb; col *= dt; } else if (a == 2) { col = col .* dgc; col *= dt; } else col = col .* kspin;
+    BB(:, a*mm + j) = col;
+  }
+  solve4(mm);   // BB = dq/dk (4 x 5) (and dq/dlambda)
+  for (int i = 0; i < 5; i++) for (int j = 0; j < 5; j++) {
+    real[int] d = DSF(:, i*9 + j);
+    for (int b = 0; b < 4; b++) { real[int] t1 = DSF(:, i*9 + 5 + b); real[int] t2 = BB(:, b*mm + j); t1 = t1 .* t2; d += t1; }
+    real[int] dl = DSL(:, i*5 + j); d -= dl;
+    DCT(:, i*5 + j) = d;          // element tangent per unit area
+  }
+  if (mucDual == 1) {   // multiplier blocks per unit area: stress/lambda (B_l), constraint 2 sc a w.r.t. k (G) and lambda (C)
+    for (int i = 0; i < 5; i++) {
+      real[int] d = DSFl(:, i);
+      for (int b = 0; b < 4; b++) { real[int] t1 = DSF(:, i*9 + 5 + b); real[int] t2 = BB(:, b*mm + 5); t1 = t1 .* t2; d += t1; }
+      if (i == 0) cL0[] = d; if (i == 1) cL1[] = d; if (i == 2) cL2[] = d; if (i == 3) cL3[] = d; if (i == 4) cL4[] = d;
+    }
+    for (int j = 0; j < 6; j++) {
+      real[int] d(nt); if (j < 5) d = DA(:, j); else d = 0;
+      for (int b = 0; b < 4; b++) { real[int] t1 = DA(:, 5 + b); real[int] t2 = BB(:, b*mm + j); t1 = t1 .* t2; d += t1; }
+      d *= 2*dualSc;
+      if (j == 0) cG0[] = d; if (j == 1) cG1[] = d; if (j == 2) cG2[] = d; if (j == 3) cG3[] = d; if (j == 4) cG4[] = d; if (j == 5) cCc[] = d;
+    }
+  }
+  if (kcVarf) {
+    { real[int] cc = DCT(:, 0); cD00[] = cc; }
+    { real[int] cc = DCT(:, 1); cD01[] = cc; }
+    { real[int] cc = DCT(:, 2); cD02[] = cc; }
+    { real[int] cc = DCT(:, 3); cD03[] = cc; }
+    { real[int] cc = DCT(:, 4); cD04[] = cc; }
+    { real[int] cc = DCT(:, 5); cD10[] = cc; }
+    { real[int] cc = DCT(:, 6); cD11[] = cc; }
+    { real[int] cc = DCT(:, 7); cD12[] = cc; }
+    { real[int] cc = DCT(:, 8); cD13[] = cc; }
+    { real[int] cc = DCT(:, 9); cD14[] = cc; }
+    { real[int] cc = DCT(:, 10); cD20[] = cc; }
+    { real[int] cc = DCT(:, 11); cD21[] = cc; }
+    { real[int] cc = DCT(:, 12); cD22[] = cc; }
+    { real[int] cc = DCT(:, 13); cD23[] = cc; }
+    { real[int] cc = DCT(:, 14); cD24[] = cc; }
+    { real[int] cc = DCT(:, 15); cD30[] = cc; }
+    { real[int] cc = DCT(:, 16); cD31[] = cc; }
+    { real[int] cc = DCT(:, 17); cD32[] = cc; }
+    { real[int] cc = DCT(:, 18); cD33[] = cc; }
+    { real[int] cc = DCT(:, 19); cD34[] = cc; }
+    { real[int] cc = DCT(:, 20); cD40[] = cc; }
+    { real[int] cc = DCT(:, 21); cD41[] = cc; }
+    { real[int] cc = DCT(:, 22); cD42[] = cc; }
+    { real[int] cc = DCT(:, 23); cD43[] = cc; }
+    { real[int] cc = DCT(:, 24); cD44[] = cc; }
+    return 0;   // assembled together with the KWC tangent in buildA (vKvC)
+  }
+  for (int q = 0; q < 25; q++) { real[int] cc = DCT(:, q); cc = cc ./ areas; DCT(:, q) = cc; }
+  real[int] c00 = DCT(:, 0), c01 = DCT(:, 1), c02 = DCT(:, 2), c03 = DCT(:, 3), c04 = DCT(:, 4);
+  real[int] c10 = DCT(:, 5), c11 = DCT(:, 6), c12 = DCT(:, 7), c13 = DCT(:, 8), c14 = DCT(:, 9);
+  real[int] c20 = DCT(:, 10), c21 = DCT(:, 11), c22 = DCT(:, 12), c23 = DCT(:, 13), c24 = DCT(:, 14);
+  real[int] c30 = DCT(:, 15), c31 = DCT(:, 16), c32 = DCT(:, 17), c33 = DCT(:, 18), c34 = DCT(:, 19);
+  real[int] c40 = DCT(:, 20), c41 = DCT(:, 21), c42 = DCT(:, 22), c43 = DCT(:, 23), c44 = DCT(:, 24);
+  matrix D00 = c00, D01 = c01, D02 = c02, D03 = c03, D04 = c04, D10 = c10, D11 = c11, D12 = c12, D13 = c13, D14 = c14;
+  matrix D20 = c20, D21 = c21, D22 = c22, D23 = c23, D24 = c24, D30 = c30, D31 = c31, D32 = c32, D33 = c33, D34 = c34;
+  matrix D40 = c40, D41 = c41, D42 = c42, D43 = c43, D44 = c44;
+  matrix Db = [[D00,D01,D02,D03,D04],[D10,D11,D12,D13,D14],[D20,D21,D22,D23,D24],[D30,D31,D32,D33,D34],[D40,D41,D42,D43,D44]];
+  matrix T1 = Db*Kk;
+  Kcons = KkT*T1;
+  return 0;
+}
+real[int] cp1a(nt), cp2a(nt), cp3a(nt);
+cp1a = C11 .* P11a; tmp = C12 .* P22a; cp1a += tmp; tmp = C16 .* P12a; tmp *= 2; cp1a += tmp;
+cp2a = C12 .* P11a; tmp = C22 .* P22a; cp2a += tmp; tmp = C26 .* P12a; tmp *= 2; cp2a += tmp;
+cp3a = C16 .* P11a; tmp = C26 .* P22a; cp3a += tmp; tmp = C66 .* P12a; tmp *= 2; cp3a += tmp;
+real[int] cp1b(nt), cp2b(nt), cp3b(nt);
+cp1b = C11 .* P11b; tmp = C12 .* P22b; cp1b += tmp; tmp = C16 .* P12b; tmp *= 2; cp1b += tmp;
+cp2b = C12 .* P11b; tmp = C22 .* P22b; cp2b += tmp; tmp = C26 .* P12b; tmp *= 2; cp2b += tmp;
+cp3b = C16 .* P11b; tmp = C26 .* P22b; cp3b += tmp; tmp = C66 .* P12b; tmp *= 2; cp3b += tmp;
+real[int] cp1c(nt), cp2c(nt), cp3c(nt);
+cp1c = C11 .* P11c; tmp = C12 .* P22c; cp1c += tmp; tmp = C16 .* P12c; tmp *= 2; cp1c += tmp;
+cp2c = C12 .* P11c; tmp = C22 .* P22c; cp2c += tmp; tmp = C26 .* P12c; tmp *= 2; cp2c += tmp;
+cp3c = C16 .* P11c; tmp = C26 .* P22c; cp3c += tmp; tmp = C66 .* P12c; tmp *= 2; cp3c += tmp;
+real[int] Iv11(nt), Iv12(nt), Iv13(nt), Iv21(nt), Iv22(nt), Iv23(nt), Iv31(nt), Iv32(nt), Iv33(nt);
+real[int] N11(nt), N12(nt), N13(nt), N21(nt), N22(nt), N23(nt), N31(nt), N32(nt), N33(nt);
+real[int] W1a(nt), W1b(nt), W1c(nt), W2a(nt), W2b(nt), W2c(nt), W3a(nt), W3b(nt), W3c(nt), W4a(nt), W4b(nt), W4c(nt);
+real[int] Dm11(nt); real[int] Dm12(nt); real[int] Dm13(nt); real[int] Dm14(nt); real[int] Dm21(nt); real[int] Dm22(nt); real[int] Dm23(nt); real[int] Dm24(nt); real[int] Dm31(nt); real[int] Dm32(nt); real[int] Dm33(nt); real[int] Dm34(nt); real[int] Dm41(nt); real[int] Dm42(nt); real[int] Dm43(nt); real[int] Dm44(nt);
+real[int] q4(nt); q4 = -2*muc;
+func int plasticTangent() {
+  taus(); flow(ta, fs1, ga, dga, eEa, 1); flow(tb, fs2, gb, dgb, eEb, 1); flow(tcc, fs3, gc, dgc, eEc, 1);
+  q4 = omb; q4 *= -2*muc;
+  m11 = dga .* Gx11; m11 *= dt; m11 += 1;   m12 = dga .* Gx12; m12 *= dt;   m13 = dga .* Gx13; m13 *= dt;
+  m21 = dgb .* Gx12; m21 *= dt;   m22 = dgb .* Gx22; m22 *= dt; m22 += 1;   m23 = dgb .* Gx23; m23 *= dt;
+  m31 = dgc .* Gx13; m31 *= dt;   m32 = dgc .* Gx23; m32 *= dt;   m33 = dgc .* Gx33; m33 *= dt; m33 += 1;
+  Iv11 = m22 .* m33; tmp = m23 .* m32; Iv11 -= tmp;
+  Iv21 = m23 .* m31; tmp = m21 .* m33; Iv21 -= tmp;
+  Iv31 = m21 .* m32; tmp = m22 .* m31; Iv31 -= tmp;
+  det = m11 .* Iv11; tmp = m12 .* Iv21; det += tmp; tmp = m13 .* Iv31; det += tmp;
+  Iv12 = m13 .* m32; tmp = m12 .* m33; Iv12 -= tmp;
+  Iv13 = m12 .* m23; tmp = m13 .* m22; Iv13 -= tmp;
+  Iv22 = m11 .* m33; tmp = m13 .* m31; Iv22 -= tmp;
+  Iv23 = m13 .* m21; tmp = m11 .* m23; Iv23 -= tmp;
+  Iv32 = m12 .* m31; tmp = m11 .* m32; Iv32 -= tmp;
+  Iv33 = m11 .* m22; tmp = m12 .* m21; Iv33 -= tmp;
+  N11 = Iv11 ./ det; tmp = dga; tmp *= dt; N11 = N11 .* tmp;
+  N12 = Iv12 ./ det; tmp = dgb; tmp *= dt; N12 = N12 .* tmp;
+  N13 = Iv13 ./ det; tmp = dgc; tmp *= dt; N13 = N13 .* tmp;
+  N21 = Iv21 ./ det; tmp = dga; tmp *= dt; N21 = N21 .* tmp;
+  N22 = Iv22 ./ det; tmp = dgb; tmp *= dt; N22 = N22 .* tmp;
+  N23 = Iv23 ./ det; tmp = dgc; tmp *= dt; N23 = N23 .* tmp;
+  N31 = Iv31 ./ det; tmp = dga; tmp *= dt; N31 = N31 .* tmp;
+  N32 = Iv32 ./ det; tmp = dgb; tmp *= dt; N32 = N32 .* tmp;
+  N33 = Iv33 ./ det; tmp = dgc; tmp *= dt; N33 = N33 .* tmp;
+  W1a = cp1a .* N11; tmp = cp1b .* N21; W1a += tmp; tmp = cp1c .* N31; W1a += tmp;
+  W1b = cp1a .* N12; tmp = cp1b .* N22; W1b += tmp; tmp = cp1c .* N32; W1b += tmp;
+  W1c = cp1a .* N13; tmp = cp1b .* N23; W1c += tmp; tmp = cp1c .* N33; W1c += tmp;
+  W2a = cp2a .* N11; tmp = cp2b .* N21; W2a += tmp; tmp = cp2c .* N31; W2a += tmp;
+  W2b = cp2a .* N12; tmp = cp2b .* N22; W2b += tmp; tmp = cp2c .* N32; W2b += tmp;
+  W2c = cp2a .* N13; tmp = cp2b .* N23; W2c += tmp; tmp = cp2c .* N33; W2c += tmp;
+  W3a = cp3a .* N11; tmp = cp3b .* N21; W3a += tmp; tmp = cp3c .* N31; W3a += tmp;
+  W3b = cp3a .* N12; tmp = cp3b .* N22; W3b += tmp; tmp = cp3c .* N32; W3b += tmp;
+  W3c = cp3a .* N13; tmp = cp3b .* N23; W3c += tmp; tmp = cp3c .* N33; W3c += tmp;
+  W4a = q4 .* N11; tmp = q4 .* N21; W4a += tmp; tmp = q4 .* N31; W4a += tmp;
+  W4b = q4 .* N12; tmp = q4 .* N22; W4b += tmp; tmp = q4 .* N32; W4b += tmp;
+  W4c = q4 .* N13; tmp = q4 .* N23; W4c += tmp; tmp = q4 .* N33; W4c += tmp;
+  Dm11 = W1a .* cp1a; tmp = W1b .* cp1b; Dm11 += tmp; tmp = W1c .* cp1c; Dm11 += tmp; Dm11 = Dm11 ./ areas;
+  Dm12 = W1a .* cp2a; tmp = W1b .* cp2b; Dm12 += tmp; tmp = W1c .* cp2c; Dm12 += tmp; Dm12 = Dm12 ./ areas;
+  Dm13 = W1a .* cp3a; tmp = W1b .* cp3b; Dm13 += tmp; tmp = W1c .* cp3c; Dm13 += tmp; Dm13 = Dm13 ./ areas;
+  Dm14 = W1a .* q4; tmp = W1b .* q4; Dm14 += tmp; tmp = W1c .* q4; Dm14 += tmp; Dm14 = Dm14 ./ areas;
+  Dm21 = W2a .* cp1a; tmp = W2b .* cp1b; Dm21 += tmp; tmp = W2c .* cp1c; Dm21 += tmp; Dm21 = Dm21 ./ areas;
+  Dm22 = W2a .* cp2a; tmp = W2b .* cp2b; Dm22 += tmp; tmp = W2c .* cp2c; Dm22 += tmp; Dm22 = Dm22 ./ areas;
+  Dm23 = W2a .* cp3a; tmp = W2b .* cp3b; Dm23 += tmp; tmp = W2c .* cp3c; Dm23 += tmp; Dm23 = Dm23 ./ areas;
+  Dm24 = W2a .* q4; tmp = W2b .* q4; Dm24 += tmp; tmp = W2c .* q4; Dm24 += tmp; Dm24 = Dm24 ./ areas;
+  Dm31 = W3a .* cp1a; tmp = W3b .* cp1b; Dm31 += tmp; tmp = W3c .* cp1c; Dm31 += tmp; Dm31 = Dm31 ./ areas;
+  Dm32 = W3a .* cp2a; tmp = W3b .* cp2b; Dm32 += tmp; tmp = W3c .* cp2c; Dm32 += tmp; Dm32 = Dm32 ./ areas;
+  Dm33 = W3a .* cp3a; tmp = W3b .* cp3b; Dm33 += tmp; tmp = W3c .* cp3c; Dm33 += tmp; Dm33 = Dm33 ./ areas;
+  Dm34 = W3a .* q4; tmp = W3b .* q4; Dm34 += tmp; tmp = W3c .* q4; Dm34 += tmp; Dm34 = Dm34 ./ areas;
+  Dm41 = W4a .* cp1a; tmp = W4b .* cp1b; Dm41 += tmp; tmp = W4c .* cp1c; Dm41 += tmp; Dm41 = Dm41 ./ areas;
+  Dm42 = W4a .* cp2a; tmp = W4b .* cp2b; Dm42 += tmp; tmp = W4c .* cp2c; Dm42 += tmp; Dm42 = Dm42 ./ areas;
+  Dm43 = W4a .* cp3a; tmp = W4b .* cp3b; Dm43 += tmp; tmp = W4c .* cp3c; Dm43 += tmp; Dm43 = Dm43 ./ areas;
+  Dm44 = W4a .* q4; tmp = W4b .* q4; Dm44 += tmp; tmp = W4c .* q4; Dm44 += tmp; Dm44 = Dm44 ./ areas;
+  if (isA) { tmp = betaS; tmp *= 4*muc; tmp = tmp ./ areas; Dm44 += tmp; }
+  matrix M11 = Dm11; matrix M12 = Dm12; matrix M13 = Dm13; matrix M14 = Dm14; matrix M21 = Dm21; matrix M22 = Dm22; matrix M23 = Dm23; matrix M24 = Dm24; matrix M31 = Dm31; matrix M32 = Dm32; matrix M33 = Dm33; matrix M34 = Dm34; matrix M41 = Dm41; matrix M42 = Dm42; matrix M43 = Dm43; matrix M44 = Dm44;
+  matrix Dmt = [[M11,M12,M13,M14],[M21,M22,M23,M24],[M31,M32,M33,M34],[M41,M42,M43,M44]];
+  matrix T1 = Dmt*Rk;
+  Kpl = RkT*T1;
+  return 0;
+}
+// ---- stage breadcrumbs and NaN guards (2026-10-31) ----
+// -trace 1: <out>_stage.txt always holds the stage the solver is in (overwritten at each stage), so a hard crash
+// (FreeFem exec error, UMFPACK failure, kill) leaves the exact place behind.  NaN guards after each stage write
+// <out>_NAN.txt (stage, array, element and its position) and stop cleanly at the end of the previous step.
+int traceOn = atoi(arg("-trace", "1"));
+ string curStage = "init";
+func int mark(string st) {
+  curStage = st;
+  if (traceOn) { ofstream fs(out + "_stage.txt"); fs << "step " << curStep << "  t=" << curT << " ns  global it " << curIt << "\n" << st << "\nwall " << clock() << " s" << endl; }
+  return 0;
+}
+// element (P0, nt) array: report the first NaN/Inf element and its centroid
+func int nanE(real[int] & a, string what) {
+  if (nanHit) return 1;
+  real sm = a.sum; if (sm == sm && abs(sm) < 1e300) return 0;
+  int k = -1; for (int i = 0; i < a.n; i++) { real v = a[i]; if (!(v == v) || abs(v) > 1e300) { k = i; break; } }
+  nanHit = 1;
+  { ofstream fn(out + "_NAN.txt"); fn << "NaN/Inf in " << what << " at step " << curStep << " (t=" << curT << " ns), global it " << curIt << ", stage: " << curStage << endl;
+    if (k >= 0 && a.n == nt) fn << "first element " << k << " grain " << Th[k].label << " centroid (" << xcen[][k] << ", " << ycen[][k] << ") um, phi " << PHc[][k] << ", J " << jdet[k] << endl; }
+  cout << "NaN/Inf in " << what << " (stage: " << curStage << ", step " << curStep << ", it " << curIt << "); see " << out << "_NAN.txt" << endl;
+  return 1;
+}
+// global (dof) vector: if NaN, localize through the element arrays that feed the residual
+func int nanV(real[int] & a, string what) {
+  if (nanHit) return 1;
+  real sm = a.sum; if (sm == sm && abs(sm) < 1e300) return 0;
+  real[int] chk(nt);
+  string[int] nm = ["dP11 (finite-strain stress)", "dP12", "dP21", "dP22", "dPth (Cosserat couple)", "Hp11 (plastic distortion)", "dw* (GB spin)", "slip a", "slip b", "slip c"];
+  for (int q = 0; q < 10; q++) {
+    if (q == 0) chk = dP11; if (q == 1) chk = dP12; if (q == 2) chk = dP21; if (q == 3) chk = dP22; if (q == 4) chk = dPth;
+    if (q == 5) chk = hp11[]; if (q == 6) chk = dwst; if (q == 7) chk = dpa; if (q == 8) chk = dpb; if (q == 9) chk = dpc;
+    if (nanE(chk, what + " <- " + nm[q])) return 1;
+  }
+  if (isA) { if (nanE(mxk, what + " <- KWC couple stress m_x")) return 1; if (nanE(myk, what + " <- KWC couple stress m_y")) return 1; }
+  nanHit = 1;
+  { ofstream fn(out + "_NAN.txt"); fn << "NaN/Inf in " << what << " at step " << curStep << " (t=" << curT << " ns), global it " << curIt << ", stage: " << curStage << " (no element array is NaN: global vector only)" << endl; }
+  cout << "NaN/Inf in " << what << " (stage: " << curStage << ")" << endl;
+  return 1;
+}
+// -symfold 2 KWC tangent (exact):  K = A_e{ (psi''-psi'/q) dq_k dq_l + (psi'/q) cos n(theta_k-theta_l) gradN_k.gradN_l
+//   - delta_kl (psi'/q)(a_k grad a + b_k grad b).gradN_k },  psi'/q = fac,  psi''-psi'/q = cc q^2,
+//   dq_k = (-b_k grad a + a_k grad b).gradN_k/(n q)
+Ph zfac, zcm, zXx, zXy, zYx, zYy;
+varf vZL([u1,u2,th],[v1,v2,ze]) = int2d(Th, qft = qf1pT)( zfac*(dx(th)*dx(ze) + dy(th)*dy(ze)) );
+varf vZM([u1,u2,th],[v1,v2,ze]) = int2d(Th, qft = qf1pT)( zcm*(zYx*dx(th) + zYy*dy(th))*(zXx*dx(ze) + zXy*dy(ze)) );
+func int buildKz(real[int] & fac, real[int] & cc) {
+  zWeights();
+  matrix DA = zw1[], DB = zv1[];
+  zfac[] = fac; matrix L = vZL(Wh, Wh);
+  matrix T1 = DA*L; T1 = T1*DA; matrix T2 = DB*L; T2 = T2*DB; Kz = T1 + T2;
+  zcm[] = cc; zcm[] *= 1./(symN*symN);
+  zXx[] = gax; zXy[] = gay; zYx[] = gax; zYy[] = gay; matrix Maa = vZM(Wh, Wh); T1 = DB*Maa; T1 = T1*DB; Kz = Kz + T1;
+  zXx[] = gax; zXy[] = gay; zYx[] = gbx; zYy[] = gby; matrix Mab = vZM(Wh, Wh); T1 = DB*Mab; T1 = T1*DA; Kz = Kz + (-1.)*T1;
+  zXx[] = gbx; zXy[] = gby; zYx[] = gax; zYy[] = gay; matrix Mba = vZM(Wh, Wh); T1 = DA*Mba; T1 = T1*DB; Kz = Kz + (-1.)*T1;
+  zXx[] = gbx; zXy[] = gby; zYx[] = gbx; zYy[] = gby; matrix Mbb = vZM(Wh, Wh); T1 = DA*Mbb; T1 = T1*DA; Kz = Kz + T1;
+  real[int] t1 = fac .* gax, t2 = fac .* gay, t3 = fac .* gbx, t4 = fac .* gby;
+  real[int] da = Bg1*t1, w1 = Bg2*t2; da += w1; real[int] db = Bg1*t3; w1 = Bg2*t4; db += w1;
+  da = da .* zw1[]; db = db .* zv1[]; da += db; da *= -1.; matrix Dd = da; Kz = Kz + Dd;
+  return 0;
+}
+// -kwcfield + -symfold 2: Gauss-Newton direction for the vartheta step (z = exp(i n vartheta) at the nodes; the matrix is
+// J' H_z J (H_z = a I + c g g >= 0 in grad z) + tau/dt M + penalty max(cos, 0) M: SPD, so a descent direction; the circle
+// curvature term of the exact Hessian (indefinite) is left out; the residual is exact)
+varf vG1v([a], [xi]) = int2d(Th)(a*dx(xi));
+varf vG2v([a], [xi]) = int2d(Th)(a*dy(xi));
+matrix Bv1 = vG1v(Ph, Vh1), Bv2 = vG2v(Ph, Vh1);
+varf vZLv(w, xi) = int2d(Th, qft = qf1pT)( zfac*(dx(w)*dx(xi) + dy(w)*dy(xi)) );
+varf vZMv(w, xi) = int2d(Th, qft = qf1pT)( zcm*(zYx*dx(w) + zYy*dy(w))*(zXx*dx(xi) + zXy*dy(xi)) );
+varf vkMz(w, xi) = int2d(Th)( kwcTau/dt*w*xi + kwcKap*phi^kwcP*max(cos(symN*(thk - th0sym - thc1)), 0.)*w*xi );
+varf vkRz(w, xi) = int2d(Th)( kwcTau/dt*(thk - thkn)*xi + kwcKap*phi^kwcP*sin(symN*(thk - th0sym - thc1))/symN*xi );
+Vh1 dkz; real[int] kwcRz(Vh1.ndof); int kwcCheck = atoi(arg("-kwccheck", "0"));
+func int kwcDirZ() {
+  symGrad();                                         // zA, zB, element gradients gax..gby, gsx = q
+  real[int] gx = gsx; real[int] nr = gx .* gx; nr += dlt*dlt; nr = sqrt(nr);
+  real[int] aH = gm ./ nr; aH *= sK; aH += eK*eK; aH *= f0;
+  real[int] n3 = nr .* nr; n3 = n3 .* nr; real[int] cc = gm ./ n3; cc *= -f0*sK;
+  real[int] t1 = aH .* gax, t2 = aH .* gay, t3 = aH .* gbx, t4 = aH .* gby;
+  real[int] ra1 = Bv1*t1, w1 = Bv2*t2; ra1 += w1; real[int] rb1 = Bv1*t3; w1 = Bv2*t4; rb1 += w1;
+  real[int] za = zA[], zb = zB[];
+  ra1 = ra1 .* zb; rb1 = rb1 .* za; real[int] Rz = rb1 - ra1; Rz *= 1./symN;   // dE_KWC/dvartheta (exact)
+  real[int] Rm = vkRz(0, Vh1); Rz += Rm;
+  matrix DA = za, DB = zb;
+  zfac[] = aH; matrix L = vZLv(Vh1, Vh1);
+  matrix T1 = DA*L; T1 = T1*DA; matrix T2 = DB*L; T2 = T2*DB; matrix Kk = T1 + T2;
+  zcm[] = cc; zcm[] *= 1./(symN*symN);
+  zXx[] = gax; zXy[] = gay; zYx[] = gax; zYy[] = gay; matrix Maa = vZMv(Vh1, Vh1); T1 = DB*Maa; T1 = T1*DB; Kk = Kk + T1;
+  zXx[] = gax; zXy[] = gay; zYx[] = gbx; zYy[] = gby; matrix Mab = vZMv(Vh1, Vh1); T1 = DB*Mab; T1 = T1*DA; Kk = Kk + (-1.)*T1;
+  zXx[] = gbx; zXy[] = gby; zYx[] = gax; zYy[] = gay; matrix Mba = vZMv(Vh1, Vh1); T1 = DA*Mba; T1 = T1*DB; Kk = Kk + (-1.)*T1;
+  zXx[] = gbx; zXy[] = gby; zYx[] = gbx; zYy[] = gby; matrix Mbb = vZMv(Vh1, Vh1); T1 = DA*Mbb; T1 = T1*DA; Kk = Kk + T1;
+  matrix Mm = vkMz(Vh1, Vh1); Kk = Kk + Mm;
+  kwcRz = Rz;
+  Rz *= -1.;
+  set(Kk, solver = sparsesolver); dkz[] = Kk^-1*Rz;
+  return 0;
+}
+func int refreshTangent() {
+  if (isA) {
+    updatePhi2();
+    real[int] gx = gsx; real[int] gy = gsy;
+    real[int] nr = gx .* gx; tmp = gy .* gy; nr += tmp; nr += dlt*dlt; nr = sqrt(nr);
+    // consistent KWC tangent: f0*s*phi2/n*(I - g g/n^2) + f0*s*phi2*dlt^2/n^3 * g g/n^2 ... written as
+    // H = a I + c g(x)g,  a = f0(s gbar/n + e^2),  c = -f0 s gbar/n^3   (gbar = element mean of g(phi))
+    real[int] aH = gm ./ nr; aH *= sK; aH += eK*eK; aH *= f0;
+    real[int] n3 = nr .* nr; n3 = n3 .* nr; real[int] cc = gm ./ n3; cc *= -f0*sK;
+    if (kwcReg == 1) {   // KG: H = f0 (s g N'/q + e^2) I + f0 s g (N'' - N'/q)/q^2 g g
+      real[int] q = gx .* gx; tmp = gy .* gy; q += tmp; q = sqrt(q); real[int] fq(q.n), cq(q.n); kgFac(q, fq, cq);
+      aH = gm .* fq; aH *= sK; aH += eK*eK; aH *= f0; cc = gm .* cq; cc *= f0*sK; }
+    tmp = gx .* gx; tmp = tmp .* cc; tmp += aH; H11[] = tmp;
+    tmp = gy .* gy; tmp = tmp .* cc; tmp += aH; H22[] = tmp;
+    tmp = gx .* gy; tmp = tmp .* cc; H12[] = tmp;
+    if (symFold == 2 && !kwcField) { H11 = 0; H12 = 0; H22 = 0; buildKz(aH, cc); }
+    if (kwcField) { H11 = 0; H12 = 0; H22 = 0; u1[] = U; thc1 = th; Kkc = vKCt(Wh, Wh); }
+  }
+  string st0 = curStage;
+  if (tanMode == 1) {
+    mark(st0 + " > tangent: consistent element tangent (finite differences of the element map + implicit local response)");
+    real tc0 = clock(); consistentTangent(); kvc = 0; consReady = true; tTanEl += clock() - tc0;
+    for (int q = 0; q < 25; q++) { real[int] cq = DCT(:, q); if (nanE(cq, "consistent element tangent")) break; }
+  } else {
+  mark(st0 + " > tangent: plastic condensation"); plasticTangent(); usePlTan = true;
+  if (eosMode > 0 && volTan) { tmp = Keos; tmp -= K0eos; for [i, v : tmp] v = max(v, 0.); kvc[] = tmp; nanE(tmp, "volumetric tangent K(J)-K0"); }
+  }
+  if (nanHit) return 1;   // never factorize a NaN matrix
+  mark(st0 + " > tangent: assemble + factorize (UMFPACK)"); real tb0 = clock(); buildA(); tTanAsm += clock() - tb0;
+  return 0;
+}
+real Wext = 0, Qtot = 0, Dcum = 0, E0 = 0;
+real Dneg = 0; int nneg = 0;
+
+func real elasticEnergy() {
+  u1[] = U;
+  real e = int2d(Th)( 0.5*dbl(dx(u1)-hp11, dy(u2)-hp22, 0.5*(dy(u1)+dx(u2))-hp12, dx(u1)-hp11, dy(u2)-hp22, 0.5*(dy(u1)+dx(u2))-hp12)
+                      + 2*muc*(rotv(u1,u2) - omp - th)^2
+                      + 0.5*curvK*((dx(th)-kq1)^2 + (dy(th)-kq2)^2) );
+  // element-mean finite-strain correction (arrays from the last taus() at this state)
+  tmp = psiF - psiL; tmp = tmp .* areas; e += tmp.sum;
+  if (isA) e += int2d(Th)( f0*(0.5*(1-phi)^2 + 0.5*aK^2*(dx(phi)^2+dy(phi)^2)
+                           + sK*gphi*NKWC(gtx^2+gty^2) + 0.5*eK^2*(gtx^2+gty^2)) );
+  if (kwcField && !kwcOneWay) { thc1 = th; e += int2d(Th)( kwcKap*phi^kwcP*(1 - cos(symN*(th0sym + thc1 - thk)))/(symN*symN) ); }
+  return e;
+}
+func real storedEnergy() {
+  Ph rr; rr[] = rhoS;
+  real e = int2d(Th)(0.5*chi*mu*b*b*rr);
+  if (isA) e = int2d(Th)(0.5*chi*mu*b*b*phi*rr);
+  return e;
+}
+func real kinU() { real[int] w = Mu*V; return 0.5*(V'*w); }
+func real kinT() { real[int] w = Mt*V; return 0.5*(V'*w); }
+func real heat() { return int2d(Th)(rhoC*(T - T0)); }
+
+// ---------------- output -----------------------------------------------
+int nstart = 0;
+if (restart != "") { ifstream fck(restart); fck >> nstart; }
+ofstream log(out + "_log.csv", append);
+ofstream dlog(out + "_diag.csv", append);
+bool thHdr = (exec("test -s " + out + "_thermo.csv") != 0);
+ofstream tlog(out + "_thermo.csv", append);
+if (thHdr) tlog << "step,t_ns,D_heat,D_implicit_slip,D_midpoint_slip,alg_mid_minus_imp_cum,neg_D_elems,min_D,stored_energy_rate,cdstore" << endl;
+if (diagon) dlog << "step,t_ns,tag,elem,grain,x,y,dist_edge,phi,grad_theta_tot,rhoG,rhoS,slip_inc,locres,tau_star,dw_star,tau_c,eta_drag,D,max_dT,rho_mob,eta_eff,tau_abs_max,v_kms" << endl;
+if (nstart == 0) log << "step,t_ns,load_GPa,iters,locres,KE_trans,KE_rot,E_elastic,E_stored,Q_heat,W_ext,D_cum,audit_residual,max_abs_slip,mean_abs_slip,max_dT,max_abs_dtheta_deg,mean_rhoS_um2,max_rhoG_um2,min_phi,neg_D_count" << endl;
+// ---------------- output: P1 only for fields whose gradients are used later, P0 for the rest ----------
+// P1 (point data): nodal solver fields that post-processing differentiates -- u, v, dtheta, theta_lattice, theta_dot, T, phi.
+// P0 (cell data): element history and element-derived quantities, written unaveraged (exact solver values, sharp at grain boundaries).
+// Only F's theta_lattice uses the P1-averaged grain angle (so its gradient includes the smeared initial boundaries).
+varf vP0P1([a], [w]) = int2d(Th)(a*w);
+matrix Bp01 = vP0P1(Ph, Vh1);
+real[int] lump(Vh1.ndof); { real[int] o0(nt); o0 = 1; lump = Bp01*o0; }
+func int toP1(real[int] & a0, real[int] & o1v) { o1v = Bp01*a0; o1v = o1v ./ lump; return 0; }
+real[int] cth0(nt), sth0(nt), gid(nt);
+for (int k = 0; k < nt; k++) { real tg = thg(Th[k].label - 1); cth0[k] = cos(tg); sth0[k] = sin(tg); gid[k] = Th[k].label; }
+string pvd = "";
+string outbase = out; { int kk = out.rfind("/"); if (kk >= 0) outbase = out(kk+1:out.length-1); }
+real t = 0;
+func int writeVTK(string tag) {
+  if (vtkon) {
+    // committed element state (called after the step is committed): zero increments
+    real[int] sva = dpa, svb = dpb, svc = dpc, svw = dwst;
+    dpa = 0; dpb = 0; dpc = 0; dwst = 0;
+    taus();
+    // Cauchy stress sigma = (dpsi/dF) F^T / J at the element-mean deformation (sigma_ij: i = force direction)
+    real[int] F11 = e11 + one, F22 = e22 + one;
+    real[int] Jd = F11 .* F22; tmp = hy1 .* hx2; Jd -= tmp;
+    real[int] q11 = PF11 .* F11; tmp = PF12 .* hy1; q11 += tmp; q11 = q11 ./ Jd;
+    real[int] sg12 = PF11 .* hx2; tmp = PF12 .* F22; sg12 += tmp; sg12 = sg12 ./ Jd;
+    real[int] sg21 = PF21 .* F11; tmp = PF22 .* hy1; sg21 += tmp; sg21 = sg21 ./ Jd;
+    real[int] q22 = PF21 .* hx2; tmp = PF22 .* F22; q22 += tmp; q22 = q22 ./ Jd;
+    // sigma_33 = S_33 / J with S_33 from the lattice-frame Green strain (Ubar_33 = 1)
+    real[int] c2 = cth0 .* cth0; real[int] s2 = sth0 .* sth0; real[int] cs = cth0 .* sth0;
+    real[int] exl = c2 .* Eb11; tmp = s2 .* Eb22; exl += tmp; tmp = cs .* Eb12; tmp *= 2; exl += tmp;
+    real[int] eyl = s2 .* Eb11; tmp = c2 .* Eb22; eyl += tmp; tmp = cs .* Eb12; tmp *= -2; eyl += tmp;
+    real[int] sg33 = exl; sg33 *= Clxz; tmp = eyl; tmp *= Clyz; sg33 += tmp; sg33 = sg33 ./ Jd;
+    if (eosMode > 0) { sg33 = S33e ./ Jd; }   // vol/dev law: S33 from eosStress()
+    // couple stress (referential)
+    real[int] mc1(nt), mc2(nt);
+    if (isA) { kwcStress(); mc1 = mxk; mc2 = myk; }
+    else { mc1 = gt1; mc1 -= kq1[]; mc1 *= Acurv; mc2 = gt2; mc2 -= kq2[]; mc2 *= Acurv; }
+    real[int] th0d(nt); for (int k = 0; k < nt; k++) th0d[k] = thg(Th[k].label - 1)*180/pi;
+    real[int] kpa = kp1, kpb = kp2;
+    // element fields, written as P0 cell data. Not written because they are exact functions of what is:
+    //   grain id = cell "Label" (triangles), theta0 = meta grain_theta0_rad[Label-1], slip_net = |p1|+|p2|+|p3|
+    Ph f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19, f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31;
+    f1[] = pa; f2[] = pb; f3[] = pc; f4[] = pathE; f5[] = pathP;
+    f6[] = rhoS; f7[] = rhoG; f8[] = kpa; f9[] = kpb; f10[] = wst; f11[] = tauc;
+    f12[] = ta; f13[] = tb; f14[] = tcc;
+    f15[] = q11; f16[] = q22; f17[] = sg12; f18[] = sg21; f19[] = sg33;
+    f20[] = mc1; f21[] = mc2; f22[] = Drate;
+    f23[] = fp11; f24[] = fp12; f25[] = fp21; f26[] = fp22; f27[] = aa; f28[] = Jd; f29[] = psiF; f30[] = rhoMob; f31[] = etad;
+    dpa = sva; dpb = svb; dpc = svc; dwst = svw;
+    Wh [w1, w2, wth]; w1[] = V;                        // velocities (u_dot, theta_dot)
+    Vh1 thdeg = th*180/pi, thtot = (th0s + th)*180/pi, thdot = wth, vx = w1, vy = w2;
+    Vh1 thsym = th0s + th; if (symFold) { thsym = th0sym + th; thtot = thsym*180/pi; } for [i, v : thsym[]] v = (v - symP*floor(v/symP + 1.))*180/pi;   // folded into [-p, 0)
+    Vh1 thkd = thsym; if (kwcField) { thkd = thk; for [i, v : thkd[]] v = (v - symP*floor(v/symP + 1.))*180/pi; }   // vartheta, folded (= theta_sym_deg without -kwcfield)
+    if (!isA) { Vh1 g0; toP1(th0d, g0[]); thtot = g0 + th*180/pi; }   // F: grain angle (P1-averaged) + rotation
+    int[int] ord(40); ord = 0; ord(0:8) = 1;           // order is per field: 9 P1 fields, then 31 P0 fields
+    savevtk(out + "_" + tag + ".vtu", Th, [u1, u2, 0], [vx, vy, 0], thdeg, thtot, thsym, thkd, thdot, T, phi,
+            f1, f2, f3, f4, f5, f6, f7, f8, f9, f10, f11, f12, f13, f14, f15, f16, f17, f18, f19,
+            f20, f21, f22, f23, f24, f25, f26, f27, f28, f29, f30, f31,
+            dataname = "u v dtheta_deg theta_lattice_deg theta_sym_deg theta_kwc_deg theta_dot T phi p1 p2 p3 slip_path_eff slip_path_phys rhoS rhoG kp_x kp_y wstar tau_c tau_1 tau_2 tau_3 sig_11 sig_22 sig_12 sig_21 sig_33 m_x m_y D_rate Fp_11 Fp_12 "
+    + "Fp_21 Fp_22 w_cosserat J psi_elastic rho_mob eta_drag",
+            order = ord, bin = true, floatsol = true, floatmesh = true);
+    // ParaView time-series collection
+    pvd = pvd + "    <DataSet timestep=\"" + t + "\" file=\"" + outbase + "_" + tag + ".vtu\"/>\n";
+    { ofstream f(out + ".pvd");
+      f << "<?xml version=\"1.0\"?>\n<VTKFile type=\"Collection\" version=\"0.1\">\n  <Collection>\n" << pvd << "  </Collection>\n</VTKFile>\n"; }
+  }
+  return 0;
+}
+// ---- GND from Curl Fp (-gndcurl 1) ----
+// weak nodal curl per row j of Fp: c_j = d1 Fp_j2 - d2 Fp_j1,  int c_j w = -int (Fp_j2 dw/dx - Fp_j1 dw/dy) + int_dOmega (Fp_j2 n1 - Fp_j1 n2) w,
+// lumped P1 mass; element mean of c; G_i = Fp_ij c_j (reference curl, Cermelli-Gurtin G = Fp Curl Fp)
+real[int] GR1(nt), GR2(nt); GR1 = 0; GR2 = 0;
+Ph fpA, fpB;
+varf vCurlFp(un, w) = int2d(Th)(-(fpA*dx(w) - fpB*dy(w))) + int1d(Th, 1, 2, 3, 4)((fpA*N.x - fpB*N.y)*w);
+func int syncP1(real[int] & a) { return 0; }   // (MPI: values made consistent on the subdomain overlap)
+real[int] lumpS = lump; syncP1(lumpS);
+func int curlFpG(real[int] & g1, real[int] & g2) {
+  Vh1 c1, c2;
+  fpA[] = fp12; fpB[] = fp11; c1[] = vCurlFp(0, Vh1); syncP1(c1[]); c1[] = c1[] ./ lumpS;
+  fpA[] = fp22; fpB[] = fp21; c2[] = vCurlFp(0, Vh1); syncP1(c2[]); c2[] = c2[] ./ lumpS;
+  Ph c1e = c1, c2e = c2;
+  g1 = fp11 .* c1e[]; tmp = fp12 .* c2e[]; g1 += tmp;
+  g2 = fp21 .* c1e[]; tmp = fp22 .* c2e[]; g2 += tmp;
+  return 0;
+}
+// ---------------- time loop ---------------------------------------------
+Wh [o1, o2, oth];
+Ht = 0;
+strength();
+localUpdate();
+refreshTangent();
+
+int nsteps = lrint(tend/dt);
+if (!isA) E0 = kinU() + kinT() + elasticEnergy() + storedEnergy() + heat();
+int ntot = (isA ? nrelax : 0) + nsteps;
+real Tprev = 0;
+real clk0 = clock();
+real omg = 1; real[int] rprev(Wh.ndof), dr(Wh.ndof);
+
+real[int] tna(nt), tnb(nt), tnc(nt), nna(nt), nnb(nt), nnc(nt), wn(nt); tna = 0; tnb = 0; tnc = 0; nna = 0; nnb = 0; nnc = 0; wn = 0;
+real[int] Dmid(nt), Dimp(nt), Wpl(nt), dStore(nt); real dAlgStep = 0, dAlgCum = 0, dClipCum = 0; int nnegStep = 0;
+real[int] pr(Wh.ndof), tv(Wh.ndof), rk(Wh.ndof), Anew(Wh.ndof), Dloc(nt), act(nt), drho(nt), Zst(nt), sa0(nt);
+real[int] Upred(Wh.ndof), dpaP(nt), dpbP(nt), dpcP(nt), dwstP(nt); dpaP = 0; dpbP = 0; dpcP = 0; dwstP = 0; real tl = 0, ta0 = 0, ts = 0, duLast = 1; int nfail = 0, nretry = 0;
+// the modified-Newton loop of a step (used for the -onfail retry; identical to the inline loop in the time loop)
+// ---- global iteration (2026-10-31) ----
+// -newton modified (solver default, old behaviour): tangent kept between refreshes, Aitken-relaxed fixed point, converged on du only.
+// -newton full: the tangent (Jacobian) is rebuilt at the current iterate in every iteration, the correction is scaled by a
+//   backtracking line search on ||R|| (Armijo, halving, at most -lsmax times), and convergence needs both
+//   du < -tol and ||R|| <= -tolres * max(||R_0||, -resfloor).
+string newtonName = arg("-newton", "modified");
+int newtonMode = (newtonName == "full") ? 1 : 0;
+if (mucDual == 1 && (tanMode != 1 || newtonMode != 1 || linMode != 0 || !kcVarf)) { cout << "ERROR: -mucdual 1 needs -variant A -tangent consistent -newton full -linsolver umfpack (-kcvarf 1)" << endl; exit(1); }
+real[int] lamStep0(nt); lamStep0 = 0;
+real tolR = atof(arg("-tolres", "1e-6")), rFloor = atof(arg("-resfloor", "1e-8"));
+int lsMax = atoi(arg("-lsmax", "6"));
+real resLast = 0, res0Last = 0, tr = 0; int lsTot = 0, nDuOnly = 0;
+real[int] Ubase(Wh.ndof), dU(Wh.ndof);
+// linear solve with a check of the achieved residual; GMRES that misses the tolerance falls back to the direct solver
+func int linSolve() {
+  tv = Aeff^-1*rhs;
+  if (linMode == 1) {
+    real[int] chk = Aeff*tv; chk -= rhs; chk = chk .* mask;
+    real nb = sqrt(rhs'*rhs); real rr = sqrt(chk'*chk)/max(nb, 1e-300);
+    linResMax = max(linResMax, rr);
+    if (!(rr < 1e3*linTol)) {
+      nLinFall++; cout << "   GMRES reached only " << rr << " relative: direct solve for this step" << endl;
+      set(Aeff, solver = sparsesolver); tv = Aeff^-1*rhs;
+      set(Aeff, solver = GMRES, eps = linTol, nbiter = linMaxIt, dimKrylov = krylovDim, precon = PreconILU);
+    }
+  }
+  return 0;
+}
+// -tancheck 1: once, compare the assembled tangent with central differences of the global residual along a fixed direction
+int tanCheck = atoi(arg("-tancheck", "0")), tanChecked = 0;
+func int checkTangentDual() {   // -mucdual 1: FD check of the whole block Jacobian along a direction in (U, lambda)
+  real[int] d(Wh.ndof); for (int i = 0; i < Wh.ndof; i++) d[i] = sin(0.37*i + 1.3); d = d .* mask;
+  real[int] dl(nt); for (int i = 0; i < nt; i++) dl[i] = 0.01*cos(0.53*i + 0.2);
+  real eps = 1e-7*max(U.linfty, 1e-3)/max(d.linfty, 1e-30);
+  real[int] U0 = U, L0 = lamS, rp(Wh.ndof), rm(Wh.ndof), cp(nt), cm(nt), dd = d, dld = dl; dd *= eps; dld *= eps;
+  U = U0; U += dd; lamS = L0; lamS += dld; u1[] = U; localUpdate(); residual(); rp = rhs; cp = rcL;
+  U = U0; U -= dd; lamS = L0; lamS -= dld; u1[] = U; localUpdate(); residual(); rm = rhs; cm = rcL;
+  U = U0; lamS = L0; u1[] = U; localUpdate(); residual();
+  real[int] fd = rm - rp; fd *= 0.5/eps; fd = fd .* mask; real[int] fc = cm - cp; fc *= 0.5/eps;
+  real[int] dv = PW*d, dv2 = PL*dl; dv += dv2; real[int] Kd = Abig*dv; real[int] k1 = PWt*Kd, k2 = PLt*Kd; k1 = k1 .* mask;
+  real[int] e1 = k1 - fd, e2 = k2 - fc;
+  cout << "TANGENT CHECK (mucdual 1): momentum rows |K d - FD|/|FD| = " << sqrt(e1'*e1)/max(sqrt(fd'*fd), 1e-300)
+       << ", constraint rows " << sqrt(e2'*e2)/max(sqrt(fc'*fc), 1e-300) << "  (|FD| " << sqrt(fd'*fd) << ", " << sqrt(fc'*fc) << ")" << endl;
+  return 0;
+}
+func int checkTangent() {
+  if (mucDual == 1) return checkTangentDual();
+  real[int] d(Wh.ndof); for (int i = 0; i < Wh.ndof; i++) d[i] = sin(0.37*i + 1.3); d = d .* mask;
+  real eps = 1e-7*max(U.linfty, 1e-3)/max(d.linfty, 1e-30);
+  real[int] U0 = U, rp(Wh.ndof), rm(Wh.ndof), dd = d; dd *= eps;
+  U = U0; U += dd; u1[] = U; localUpdate(); residual(); rp = rhs;
+  U = U0; U -= dd; u1[] = U; localUpdate(); residual(); rm = rhs;
+  U = U0; u1[] = U; localUpdate(); residual();
+  real[int] fd = rm - rp; fd *= 0.5/eps; fd = fd .* mask;          // = (d f_int/dU) d  (rhs = -f_int + ...)
+  real[int] Kd = Aeff*d; Kd = Kd .* mask;
+  real[int] e = Kd - fd;
+  cout << "TANGENT CHECK (" << tanName << "): |K d - FD| / |FD| = " << sqrt(e'*e)/max(sqrt(fd'*fd), 1e-300) << "   |FD| = " << sqrt(fd'*fd) << endl;
+  { ofstream fc(out + "_tancheck.txt", append); fc << "step " << curStep << " it " << curIt << " tangent " << tanName << " rel.error " << sqrt(e'*e)/max(sqrt(fd'*fd), 1e-300) << endl; }
+  return 0;
+}
+func int newtonSolve(int mx, int itOff, string tg) {
+  int it; real du = 1, rn = 0, r0 = 0;
+  for (it = 0; it < mx; it++) {
+    if (nanHit) break;
+    curIt = itOff + it;
+    real c0k = clock();
+    mark(tg + "local plastic update (slip/GB-spin Newton per element)");
+    localUpdate();
+    if (nanE(dpa, "slip increment a") || nanE(dpb, "slip increment b") || nanE(dpc, "slip increment c") || nanE(dwst, "GB spin increment") || nanE(ta, "resolved shear stress a") || nanE(jdet, "J = det Ubar")) break;
+    tl += clock() - c0k; c0k = clock();
+    if (newtonMode == 1) { if (it % tanEvery == 0) { mark(tg + "tangent at the current iterate"); refreshTangent(); if (nanHit) break; } }
+    tr += clock() - c0k; c0k = clock();
+    mark(tg + "residual (inertia + finite-strain/EOS elastic + KWC couple stress)");
+    residual();
+    if (nanV(rhs, "residual")) break;
+    if (tanCheck && !tanChecked) { tanChecked = 1; mark(tg + "tangent check"); checkTangent(); }
+    rn = sqrt(rhs'*rhs); if (mucDual == 1) rn = sqrt(rhs'*rhs + rcL'*rcL); if (it == 0) r0 = rn;
+    ta0 += clock() - c0k; c0k = clock();
+    if (it > 0 && !(rn < 1e4*max(r0, rFloor))) { cout << "   global iteration diverging (|R| " << rn << " vs |R0| " << r0 << "): abandoned" << endl; it = mx; break; }   // -> retry / clean stop
+    if (newtonMode == 1 && it > 0 && du < tolU) {
+      if (rn <= tolR*max(r0, rFloor)) break;                    // converged: increment and residual (local state is current)
+      if (du < 0.01*tolU) { nDuOnly++; break; }                 // increment negligible (1e-2 tol): residual floor of the inexact local solve
+    }
+    mark(tg + "linear solve for (u, theta)");
+    if (mucDual == 1) { real[int] bR = PW*rhs, b2 = PL*rcL; bR += b2; real[int] xs = Abig^-1*bR; tv = PWt*xs; dLam = PLt*xs; }
+    else linSolve();
+    if (nanV(tv, "Newton correction")) break;
+    ts += clock() - c0k;
+    if (newtonMode == 0) {   // Aitken relaxation of the fixed-point (modified Newton) iteration
+      if (it == 0) { omg = 1; } else {
+        dr = tv; dr -= rprev; real dd = dr'*dr; if (dd > 0) omg = -omg*(rprev'*dr)/dd;
+        omg = max(0.2, min(omg, 8.));
+      }
+      rprev = tv; tv *= omg; U += tv; u1[] = U;
+      du = tv.linfty/max(U.linfty, 1e-30);
+      if (verbose) cout << "   it " << it << " du " << du << " |R| " << rn << " omg " << omg << " locits " << nlocit << " locres " << locres << " maxdp " << max(dpa.linfty, dpb.linfty, dpc.linfty) << endl;
+      if (du < tolU && it > 0) break;
+    } else {                 // full Newton: backtracking line search on ||R||
+      Ubase = U; lamBase = lamS; real w = 1; int ls;
+      for (ls = 0; ls <= lsMax; ls++) {
+        U = Ubase; dU = tv; dU *= w; U += dU; u1[] = U;
+        if (mucDual == 1) { lamS = dLam; lamS *= w; lamS += lamBase; }
+        if (ls == lsMax) break;                       // accept the smallest step
+        mark(tg + "line search trial " + ls);
+        localUpdate(); residual();
+        real rt = sqrt(rhs'*rhs); if (mucDual == 1) rt = sqrt(rhs'*rhs + rcL'*rcL);
+        if (rt == rt && rt <= (1 - 1e-4*w)*rn) break;
+        w *= 0.5; lsTot++;
+      }
+      du = w*tv.linfty/max(U.linfty, 1e-30);
+      if (verbose) cout << "   it " << it << " du " << du << " |R| " << rn << " (|R0| " << r0 << ") step " << w << " locits " << nlocit << " locres " << locres << " polish " << lastPolishRes << " maxdp " << max(dpa.linfty, dpb.linfty, dpc.linfty) << endl;
+    }
+  }
+  duLast = du; resLast = rn; res0Last = r0;
+  return it;
+}
+cout << "variant " << variant << "  j=" << jz << " um^2  muc=" << muc << "  amp=" << amp << " GPa  dir=" << ldir
+     << "  dt=" << dt << "  steps=" << ntot << "  nt=" << nt << "  ndof=" << Wh.ndof << endl;
+func int saveCkF(int n, string fn) {
+  { ofstream f(fn);
+    f.precision(17);
+    f << n << endl << t << " " << Tload << " " << Wext << " " << Dcum << " " << E0 << " " << nneg << endl;
+    f << U << V << Acc << pa << pb << pc << rhoS << rhoG << kp1 << kp2 << wst << tna << tnb << tnc << nna << nnb << nnc << wn << T[] << phi[] << thR[] << pathE << pathP << fp11 << fp12 << fp21 << fp22;
+  }
+  { ofstream f(fn + ".rhoM"); f.precision(17); f << n << endl << rhoM; }   // mobile density (side file: the main checkpoint format is unchanged)
+  if (gndCurl) { ofstream f(fn + ".gnd"); f.precision(17); f << n << endl << GR1 << GR2; }   // Curl-Fp GND reference (side file)
+  if (kwcField) { ofstream f(fn + ".thk"); f.precision(17); f << n << endl << thk[]; }   // KWC orientation field (side file)
+  if (mucDual) { ofstream f(fn + ".lam"); f.precision(17); f << n << endl << lamNext; }   // -mucdual multiplier for step n+1 (side file)
+  return 0;
+}
+func int saveCk(int n) { return saveCkF(n, out + "_ck.txt"); }
+if (restart != "") {
+  ifstream f(restart);
+  int nn; f >> nn; f >> t >> Tload >> Wext >> Dcum >> E0 >> nneg;
+  f >> U >> V >> Acc >> pa >> pb >> pc >> rhoS >> rhoG >> kp1 >> kp2 >> wst >> tna >> tnb >> tnc >> nna >> nnb >> nnc >> wn >> T[] >> phi[] >> thR[] >> pathE >> pathP >> fp11 >> fp12 >> fp21 >> fp22;
+  u1[] = U;
+  { // mobile density: side file <restart>.rhoM if present, else (old checkpoints) the quasi-steady value min(rho_M*(rho_F), rho_F)
+    int nm = -1;
+    if (exec("test -s " + restart + ".rhoM") == 0) { ifstream fm(restart + ".rhoM"); fm >> nm; if (nm == nn) fm >> rhoM; }
+    if (nm == nn) { cout << "rho_M read from " << restart << ".rhoM" << endl; }
+    else { real[int] rf = rhoS + rhoG; real[int] q = rf; q *= 1./rhoFcut; q = sqrt(q); q *= -1; q += 1; q *= rhoMsat;
+           for [i, v : q] v = max(rhoMmin, min(v, rf[i])); rhoM = q; if (dragRho == 3) cout << "rho_M initialised quasi-steady (no side file)" << endl; }
+  }
+  if (gndCurl) {   // Curl-Fp GND reference: side file <restart>.gnd; the relaxed checkpoint recomputes it below (relaxfix reset)
+    int ng = -1;
+    if (exec("test -s " + restart + ".gnd") == 0) { ifstream fg(restart + ".gnd"); fg >> ng; if (ng == nn) fg >> GR1 >> GR2; }
+    if (ng == nn) cout << "GND reference read from " << restart << ".gnd" << endl;
+    else if (!(isA && nn == nrelax)) cout << "WARNING: -gndcurl 1 but no " << restart << ".gnd for step " << nn << ": GND reference set to 0" << endl;
+  }
+  if (kwcField) {   // KWC orientation field: side file <restart>.thk, else theta0sym + theta
+    int nk = -1;
+    if (exec("test -s " + restart + ".thk") == 0) { ifstream fk(restart + ".thk"); fk >> nk; if (nk == nn) fk >> thk[]; }
+    if (nk == nn) cout << "KWC orientation field read from " << restart << ".thk" << endl;
+    else { thk = th0sym + th; cout << "-kwcfield 1: no " << restart << ".thk for step " << nn << ": vartheta = theta0sym + theta" << endl; }
+    thkn = thk;
+  }
+  if (mucDual) {   // multiplier: side file <restart>.lam, else 0 (rebuilt by the Uzawa updates)
+    int nl = -1;
+    if (exec("test -s " + restart + ".lam") == 0) { ifstream fl(restart + ".lam"); fl >> nl; if (nl == nn) fl >> lamS; }
+    if (nl == nn) cout << "-mucdual multiplier read from " << restart << ".lam" << endl;
+    else { u1[] = U; kin(); taus(); lamS = aa; lamS *= 2*mucIn;   // penalty checkpoint: start from its skew stress 2 mu_c a (continuous restart)
+           cout << "-mucdual: no " << restart << ".lam for step " << nn << ": multiplier initialised to the penalty skew stress 2 mu_c a" << endl; }
+    lamNext = lamS;
+  }
+  cout << "restarted from " << restart << " at step " << nstart << " t=" << t << endl;
+  // keep the ParaView time series written before the restart
+  { ifstream fp(out + ".pvd"); string ln;
+    while (fp.good()) { getline(fp, ln); if (ln.find("<DataSet") >= 0) pvd = pvd + ln + "\n"; } }
+  // A started from the relaxed checkpoint (saved at n = nrelax BEFORE the end-of-relaxation reset): apply that reset now.
+  // Without it the loaded run inherits the relaxation state: rhoS swept down to the 1e-3 floor in the cores, thR = 0
+  // (so rhoG counts the relaxation rotation), the relaxation heat and velocities, and E0 = 0.  -relaxfix 0 = old behaviour.
+  bool didReset = false;
+  if (isA && nn == nrelax && atoi(arg("-relaxfix", "1"))) {
+    V = 0; Acc = 0; Wext = 0; Dcum = 0; nneg = 0; T = T0; Tn = T0;
+    rhoS = rho0; rhoM = rho0; thR = th; rhoG = 0; didReset = true;
+    if (gndCurl) curlFpG(GR1, GR2);
+    cout << "relaxfix: end-of-relaxation reset applied to the relaxed checkpoint" << endl;
+  }
+  if (bcKin && !(isA && nn < nrelax)) { real[int] va = V .* bcm, aa = Acc .* bcm; fixBCkin(t);
+    cout << "bckin: prescribed-dof kinematics reset on restart (max |v| " << va.linfty << ", max |a| " << aa.linfty << " before)" << endl; }
+  strength(); localUpdate(); refreshTangent();
+  if (didReset) { E0 = kinU() + kinT() + elasticEnergy() + storedEnergy() + heat(); cout << "relaxfix: E0=" << E0 << endl; }
+}
+// ---- run metadata (JSON) for later re-derivation of quantities ----
+if (nstart == 0) {
+  ofstream f(out + "_meta.json");
+  f.precision(10);
+  f << "{\n";
+  f << " \"units\": {\"length\": \"um\", \"time\": \"ns\", \"stress\": \"GPa\", \"temperature\": \"K\", \"density\": \"1e3 kg/m3\", \"energy_per_thickness\": \"GPa um^2 = 1e-3 J/m\"},\n";
+  f << " \"variant\": \"" << variant << "\", \"mesh\": \"" << mfile << "\", \"j_um2\": " << jz << ", \"amp_GPa\": " << amp << ", \"load_dir\": \"" << ldir << "\", \"piston_up_um_ns\": " << pistUp << ", \"piston_ut_um_ns\": " << pistUt << ", \"ramp_ns\": " << pistTr << ", \"hold_ns\": " << pistTh << ",\n";
+  f << " \"tend_ns\": " << tend << ", \"dt_ns\": " << dt << ", \"nrelax\": " << (isA ? nrelax : 0) << ", \"pulse_ns\": [2, 3, 2],\n";
+  f << " \"mu_c\": " << muc << ", \"rho\": " << rho << ", \"C_lattice\": {\"xxxx\": " << Clxx << ", \"yyyy\": " << Clyy << ", \"xxyy\": " << Clxy << ", \"xyxy\": " << Clss << ", \"xxzz\": " << Clxz << ", \"yyzz\": " << Clyz << "},\n";
+  f << " \"lattice_frame\": \"x=[110], y=[001], z=[-110]\",\n";
+  f << " \"slip_systems_lattice\": [";
+  for (int a = 0; a < 3; a++) f << (a ? ", " : "") << "{\"s\": [" << slx[a] << ", " << sly[a] << "], \"n\": [" << -sly[a] << ", " << slx[a] << "], \"f\": " << fsa[a] << "}";
+  f << "],\n";
+  f << " \"grain_theta0_rad\": ["; for (int g = 0; g < 8; g++) f << (g ? ", " : "") << thg(g); f << "],\n";
+  f << " \"hardening\": {\"tau0\": " << tau0 << ", \"lambda_T\": " << lamT << ", \"mu\": " << mu << ", \"b_um\": " << b << ", \"rho0_um2\": " << rho0 << ", \"K\": " << Kkmt << ", \"d_um\": " << dkmt << ", \"chi\": " << chi << ", \"alpha_mu\": " << alphaMu << "},\n";
+  f << " \"rate\": {\"gdot0_per_ns\": " << g0 << ", \"m\": " << mexp << ", \"B0_GPa_ns\": " << B0 << "},\n";
+  f << " \"mobile_drag\": {\"dragrho\": " << dragRho << ", \"vc_um_per_ns\": " << vcrel << ", \"c1c2c3_MR\": [" << c1MR << ", " << c2MR << ", " << c3MR << "], \"rhoMsat\": " << rhoMsat << ", \"C2M\": " << C2M << ", \"rhoFcut\": " << rhoFcut << ", \"rhoMmin\": " << rhoMmin << ", \"eta_d\": \"B0 (T/T0)/(b^2 rho_m) [sqrt(1+(b tau/(v_c B))^2) if v_c>0]\"},\n";
+  f << " \"robustness\": {\"exactexp\": " << exactExp << ", \"spinmax\": " << spinMax << ", \"spinbranch\": " << spinBranch << ", \"bckin\": " << bcKin << ", \"symfold\": " << symFold << ", \"symn\": " << symN << ", \"gndcurl\": " << gndCurl << ", \"kwcfield\": " << kwcField << ", \"kwckap\": " << kwcKap << ", \"kwcp\": " << kwcP << ", \"kwctau\": " << kwcTau << ", \"kwcinit\": " << kwcInit << ", \"kwconeway\": " << kwcOneWay << ", \"kwcediff\": " << kwcEdiff << ", \"mucdual\": " << mucDual << ", \"dualit\": " << dualIt << ", \"predictor\": \"" << predName << "\", \"onfail\": \"" << onFail << "\", \"maxit\": " << maxit << ", \"maxitretry\": " << maxitRetry << ", \"ckroll\": " << ckRoll << ", \"dissip_implicit\": " << dissImp << ", \"cdstore\": " << cdStore << ", \"softmin\": " << softMin << "},\n";
+  f << " \"elastic_law\": {\"eos\": \"" << eosName << "\", \"K0_GPa\": " << K0eos << ", \"Kprime\": " << Kpeos << ", \"voltan\": " << volTan << "},\n";
+  f << " \"tangent\": {\"mode\": \"" << tanName << "\", \"fdk\": " << fdK << ", \"fdq\": " << fdQ << ", \"polish\": " << nPolish << "},\n";
+  f << " \"newton\": {\"mode\": \"" << newtonName << "\", \"tol_du\": " << tolU << ", \"tolres\": " << tolR << ", \"resfloor\": " << rFloor << ", \"lsmax\": " << lsMax << ", \"maxit\": " << maxit << "},\n";
+  f << " \"thermal\": {\"T0\": " << T0 << ", \"rhoC\": " << rhoC << ", \"k\": " << kth << "},\n";
+  f << " \"curvature_F\": {\"A\": " << Acurv << ", \"l_mode\": " << lmode << "},\n";
+  f << " \"kwc_A\": {\"f0\": " << f0 << ", \"a\": " << aK << ", \"s\": " << sK << ", \"eps\": " << eK << ", \"delta\": " << dlt << ", \"kwcreg\": " << kwcReg << ", \"kwcgam\": " << gK << ", \"eta_phi0\": " << etaPhi0 << ", \"Q_phi\": " << Qphi << ", \"eta_star0\": " << etaStar0 << ", \"C_D\": " << CD
+    << ", \"g\": \"-2[phi + ln(1-phi)]\", \"h\": 1, \"f\": \"(1-phi)^2/2\", \"spin_friction\": \"eta_s = 2 eta_star0/(1-phi)^2\", \"phi_max\": " << phimax << "},\n";
+  f << " \"kinematics\": \"finite deformation: F = I + grad u = R(theta) Ubar Fp, Fp(0) = I in the grain-rotated reference lattice; SVK on Ebar = (Ubar^T Ubar - I)/2 + 2 mu_c a^2, a = (Ubar_21 - Ubar_12)/2; "
+    << "element-mean finite-strain correction on a pointwise quadratic P2 operator\",\n";
+  f << " \"fields_note\": \"Point data (P1, nodal): u, v, dtheta_deg, theta_lattice_deg, theta_dot, T, phi -- the fields differentiated in post-processing. ";
+  f << "Cell data (P0, one value per triangle, exact solver values at the element-mean deformation): p1-p3 (accumulated slip), slip paths, rhoS, rhoG, kp, wstar, tau_c, tau_1-3 (Mandel resolved shear stress M:s(x)n), ";
+  f << "Cauchy stress sig_ij = (P F^T/J)_ij with i the force direction, sig_33, referential couple stress m, D_rate, Fp_ij (plastic distortion, reference frame), w_cosserat = (Ubar_21-Ubar_12)/2, J = det F, "
+    << "psi_elastic (SVK + Cosserat energy density per reference area). ";
+  f << "Cells include the boundary edges (line cells); use triangle cells only. Grain id = cell Label of triangles. ";
+  f << "Derived in paraview_derived.py: theta0, slip_net, drag_eta, strain measures. ";
+  f << "For F, theta_lattice_deg uses the grain angle averaged to the nodes. ";
+  f << "Coordinates and u are referential (Lagrangian); use u to warp. ";
+  f << "theta_dot in rad/ns, D_rate in GPa/ns, rho in um^-2.\"\n";
+  f << "}\n";
+}
+if (nstart == 0 && !isA) writeVTK("t0");
+for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
+  bool relax = isA && (n <= nrelax);
+  if (!relax) t += dt;
+  Tprev = Tload;
+  Tload = (relax || isP) ? 0. : amp*envelope(t/tscale);
+  real etaPhi = (relax ? etaPhiRelax : etaPhi0);
+  Un = U; lamStep0 = lamS;
+  pr = U; pr *= c0; tv = V; tv *= c1; pr += tv; pr += Acc;
+  rin = Mu*pr; rk = Mt*pr; rin += rk;
+  dpa = 0; dpb = 0; dpc = 0; dva = 0; dvb = 0; dvc = 0; dwst = 0;
+  if (slipPred && !relax) { dpa = dpaP; dpb = dpbP; dpc = dpcP; dwst = dwstP; }
+  curStep = n; curIt = -1; curT = t;
+  mark("step start: phase-field weights, strength and drag");
+  if (isA) updatePhi2();
+  if (kwcSpin != 0 && relax) { th0sym[] += kwcSpin*hSpin[]; if (kwcField && kwcSpinCo) thk[] += kwcSpin*hSpin[]; }   // (-kwcspin test; -kwcspinco 1 co-rotates vartheta)
+  if (isA && relax && n % atoi(arg("-rfr","4")) == 0) refreshTangent();
+  strength();
+  // predictor: -predictor avg (old: average acceleration, U + dt V + dt^2/4 A) | vel (U + dt V) | none (U).  Only the starting
+  // guess of the global Newton: with -newton full the converged step does not depend on it; vel/none avoid amplifying a stiff
+  // alternating acceleration mode into a kink (dt^2/4 A) before the first iteration.
+  if (predName != "none") { tv = V; tv *= dt; U += tv; }
+  if (predName == "avg") { tv = Acc; tv *= 0.25*dt*dt; U += tv; }
+  if (isP && !relax && !isSP) { U = U .* pistk; U = U .* confk; tv = pistm; tv *= -pistonDisp(t); U += tv; }   // prescribed piston displacement (x) on the right edge
+  if (isSP && !relax) { U = U .* mask; tv = pistm; tv *= -pistonDisp(t); U += tv; tv = pistmT; tv *= pistonDispU(t, pistUt); U += tv; }   // shear plate: every prescribed dof set exactly (wall 0, plate -d_n, +d_t)
+  u1[] = U;
+  Upred = U;
+  mark("predictor (Newmark average acceleration, piston displacement)"); nanV(U, "predicted displacement");
+  int it; real du = 1;
+  tl = 0; ta0 = 0; ts = 0; tr = 0;
+  it = newtonSolve(maxit, 0, "global it: "); du = duLast;
+  bool okStep = (it < maxit) && (U.linfty < 1e30) && (U.linfty == U.linfty) && !nanHit;
+  if (!okStep && onFail != "commit") {
+    nfail++;
+    cout << "step " << n << " t=" << t << ": global iteration not converged (" << it << " its, du " << du << ", |R| " << resLast << " of |R0| " << res0Last << ")" << endl;
+    if (onFail == "retry" && !nanHit) {   // restore the predictor, fresh tangent at it, re-solve with more iterations
+      U = Upred; u1[] = U; dpa = 0; dpb = 0; dpc = 0; dva = 0; dvb = 0; dvc = 0; dwst = 0; lamS = lamStep0;
+      mark("retry: restore predictor + fresh tangent");
+      localUpdate(); refreshTangent(); nretry++;
+      it = newtonSolve(maxitRetry, 1000, "retry: "); du = duLast;
+      okStep = (it < maxitRetry) && (U.linfty < 1e30) && (U.linfty == U.linfty) && !nanHit;
+      cout << "   retry with fresh tangent: " << (okStep ? "converged" : "FAILED") << " in " << it << " its" << endl;
+    }
+    if (!okStep) {   // stop cleanly at the end of step n-1 (nothing of step n is committed yet except U)
+      U = Un; u1[] = U; dpa = 0; dpb = 0; dpc = 0; dva = 0; dvb = 0; dvc = 0; dwst = 0; lamS = lamStep0;
+      if (!relax) t -= dt; Tload = Tprev;
+      saveCk(n - 1); localUpdate();
+      if (vtkon) writeVTK("stall" + n);
+      { ofstream fs(out + "_NOCONV.txt"); fs << "global iteration did not converge at step " << n << " (t=" << (t + (relax ? 0 : dt)) << " ns) after "
+          << (onFail == "retry" ? "a retry with a fresh tangent" : "maxit iterations") << "; checkpoint = end of step " << (n - 1) << ". -onfail commit = old behaviour." << endl; }
+      cout << "NOCONV: stopped; checkpoint written at step " << (n - 1) << endl;
+      break;
+    }
+  }
+  if (verbose) cout << "step " << n << " t " << t << " iters " << it << " |R| " << resLast << "/" << res0Last << " local " << tl << " s, tangent " << tr << " s [element " << tTanEl << " (FD " << tTanFD << ", Kc assembly " << tTanKc << "), global assembly " << tTanAsm << " (ILU " << tTanPre << ")], residual " << ta0 << " s, solve " << ts << " s" << endl;
+  tTanEl = 0; tTanAsm = 0; tTanFD = 0; tTanKc = 0; tTanPre = 0;
+  mark("converged: final local update"); localUpdate();
+  if (mucDual == 2 && dualIt > 1) {   // -mucdual: extra Uzawa re-solves within the step (lambda += 2 r a, then Newton again)
+    for (int kd = 1; kd < dualIt; kd++) {
+      real amx = aa.linfty; if (n <= 3 || n % 50 == 0) cout << "step " << n << " uzawa " << kd << ": max|a| " << amx << " max|lambda| " << lamS.linfty << endl;
+      if (amx < 1e-10) break;
+      tmp = aa; tmp *= 2*muc; lamS += tmp;
+      mark("uzawa re-solve"); localUpdate();
+      int itd = newtonSolve(maxit, 0, "uzawa: "); localUpdate();
+      if (!(itd < maxit) || nanHit) { cout << "step " << n << ": Uzawa re-solve " << kd << " not converged (" << itd << " its); keeping it" << endl; break; }
+    }
+  }
+  if (newtonMode == 0) { if (!relax && n % nref == 0) { mark("converged: scheduled tangent refresh"); refreshTangent(); } }   // full Newton rebuilds it every iteration   // tangent from the converged state of this step
+  mark("commit: Newmark update, external work, dissipation");
+  // Newmark update
+  Anew = U; Anew -= Un; Anew *= c0; tv = V; tv *= c1; Anew -= tv; Anew -= Acc;
+  tv = Acc; tv += Anew; tv *= 0.5*dt; V += tv; Acc = Anew;
+  if (bcKin && !relax) fixBCkin(t);   // exact kinematics on the prescribed dofs (-bckin)
+  // external work (trapezoidal in load)
+  o1[] = Un;
+  Wext += 0.5*(Tprev + Tload)*int1d(Th, 3)(dxl*(u1 - o1) + dyl*(u2 - oth*0 - o2));
+  // dissipation and commit
+  // dissipation with midpoint driving forces: consistent with the trapezoidal energy identity
+  taus();
+  tmp = ta + tna; tmp *= 0.5; Dmid = tmp .* dpa;
+  tmp = tb + tnb; tmp *= 0.5; tmp = tmp .* dpb; Dmid += tmp;
+  tmp = tcc + tnc; tmp *= 0.5; tmp = tmp .* dpc; Dmid += tmp;
+  Dimp = ta .* dpa; tmp = tb .* dpb; Dimp += tmp; tmp = tcc .* dpc; Dimp += tmp;    // tau_{n+1} dgamma: >= 0 for a converged backward-Euler step
+  Wpl = abs(Dimp);
+  tna = ta; tnb = tb; tnc = tcc;
+  if (dissImp) Dloc = Dimp; else Dloc = Dmid;
+  if (mucDual) { if (mucDual == 2) { lamNext = aa; lamNext *= 2*muc; lamNext += lamS; } else lamNext = lamS;   // Uzawa update for the next step (applied at the end of this step) | monolithic: as solved
+    if (n % 10 == 0 || n <= 3) { real amx = aa.linfty, lmx = lamS.linfty; cout << "step " << n << " mucdual: max|a| " << amx << " (" << amx*180/pi << " deg), max|lambda| " << lmx << " GPa" << endl; } }
+  tmp = Dmid - Dimp; tmp = tmp .* areas; dAlgStep = tmp.sum;   // midpoint - implicit (algorithmic part, O(dt^2) per step)
+  tmp = tstar .* dwst; Dloc += tmp; wn = wloc;   // implicit spin: tau*_{n+1} dw* = eta_s dw*^2/dt >= 0
+  if (!isA) { nus();
+    tmp = nua + nna; tmp *= 0.5; tmp = tmp .* dva; Dloc += tmp; nna = nua;
+    tmp = nub + nnb; tmp *= 0.5; tmp = tmp .* dvb; Dloc += tmp; nnb = nub;
+    tmp = nuc + nnc; tmp *= 0.5; tmp = tmp .* dvc; Dloc += tmp; nnc = nuc; }
+  act = abs(dpa); act *= fs1; tmp = abs(dpb); tmp *= fs2; act += tmp; tmp = abs(dpc); tmp *= fs3; act += tmp;
+  tmp = rhoS; dStore = sqrt(tmp); dStore *= Kkmt/b; dStore = dStore .* act;            // KMT storage (>= 0)
+  drho = rhoS; drho *= -2*dkmt/b; drho = drho .* act; drho += dStore;                   // + dynamic recovery
+  if (isA) {
+    // phase field: backward Euler, Newton on the log coupling g'(phi) = 2 phi/(1-phi), g'' = 2/(1-phi)^2
+    if (kwcField) {   // KWC orientation field: backward-Euler gradient flow, Newton on the exact residual (lift fixed per iterate;
+                      // penalty curvature max(cos, 0) in the matrix), each update capped at 0.1 rad
+      mark("commit: KWC orientation field (vartheta) solve");
+      thkn = thk; u1[] = U; thc1 = th;
+      real dmx = 0; int kk;
+      for (kk = 0; kk < kwcIt; kk++) {
+        Vh1 dk;
+        if (symFold == 2) { kwcDirZ(); dk = dkz;
+          if (kwcCheck && kk == 0) {   // FD check of the vartheta residual: dPhi/dvartheta . d
+            real[int] t0 = thk[], dd(Vh1.ndof); for (int i = 0; i < Vh1.ndof; i++) dd[i] = sin(0.37*i + 1.3)*1e-6;
+            thk[] = t0; thk[] += dd; real Pp = kwcPhi(); thk[] = t0; thk[] -= dd; real Pm = kwcPhi(); thk[] = t0; kwcPhi();
+            real rdd = kwcRz'*dd;
+            cout << "KWCCHECK step " << n << ": FD " << (Pp - Pm)/2 << "  residual.d " << rdd << endl; }
+        }
+        else {
+        symGrad();                                       // lifted grad vartheta -> gsx, gsy
+        real[int] gx = gsx; real[int] gy = gsy;
+        real[int] nr = gx .* gx; tmp = gy .* gy; nr += tmp; nr += dlt*dlt; nr = sqrt(nr);
+        real[int] aH = gm ./ nr; aH *= sK; aH += eK*eK; aH *= f0;           // dpsi/dq / q
+        real[int] n3 = nr .* nr; n3 = n3 .* nr; real[int] cc = gm ./ n3; cc *= -f0*sK;
+        DkK[] = aH; sKx[] = gx; sKy[] = gy;
+        tmp = gx .* gx; tmp = tmp .* cc; tmp += aH; KH11[] = tmp;           // H = a I + c g g (positive definite)
+        tmp = gy .* gy; tmp = tmp .* cc; tmp += aH; KH22[] = tmp;
+        tmp = gx .* gy; tmp = tmp .* cc; KH12[] = tmp;
+        solve kwcNt(dk, xi) = int2d(Th)( kwcTau/dt*dk*xi + KH11*dx(dk)*dx(xi) + KH12*(dx(dk)*dy(xi) + dy(dk)*dx(xi)) + KH22*dy(dk)*dy(xi)
+                                       + kwcKap*phi^kwcP*max(cos(symN*(thk - th0sym - thc1)), 0.)*dk*xi )
+          + int2d(Th)( kwcTau/dt*(thk - thkn)*xi + DkK*(sKx*dx(xi) + sKy*dy(xi))
+                       + kwcKap*phi^kwcP*sin(symN*(thk - th0sym - thc1))/symN*xi );
+        }
+        // backtracking on the incremental functional Phi = tau/(2dt)|vt - vt_n|^2 + E_KWC(vt) + penalty (H is PSD: descent direction)
+        real P0v = kwcPhi(); real[int] t0 = thk[]; real al = 1; int nb;
+        for (nb = 0; nb < 30; nb++) { thk[] = t0; real[int] st = dk[]; st *= al; thk[] += st; if (kwcPhi() <= P0v) break; al *= 0.5; }
+        if (nb == 30) { thk[] = t0; kwcLS = -1; break; }
+        dmx = al*dk[].linfty; kwcLS += nb;
+        if (dmx < 1e-9) break;
+      }
+      kwcItLast = kk; kwcDmx = dmx;
+      kin();                                             // KWC gradients of the new vartheta (phi equation, recovery, output)
+      if (verbose || n % 10 == 0) cout << "step " << n << " vartheta: " << kk << " Newton its, last change " << dmx << ", halvings " << kwcLS << endl; kwcLS = 0;
+    }
+    mark("commit: phase-field (KWC phi) Newton solve");
+    phin = phi;
+    Ph Nd = NKWC(gtx^2 + gty^2), rr; rr[] = rhoS;
+    Vh1 phik = phi;
+    for (int kn = 0; kn < 8; kn++) {
+      solve phieq(phi, xi) = int2d(Th)((etaPhi*exp(Qphi/Rgas*(1./T - 1./T0))/dt + f0 + f0*sK*Nd*2/(1-phik)^2)*phi*xi
+                                      + f0*aK^2*(dx(phi)*dx(xi) + dy(phi)*dy(xi)))
+                        - int2d(Th)(etaPhi*exp(Qphi/Rgas*(1./T - 1./T0))/dt*phin*xi + (f0 - 0.5*chi*mu*b*b*rr)*xi
+                                    - f0*sK*Nd*(2*phik/(1-phik) - 2*phik/(1-phik)^2)*xi);
+      for [i, pv : phi[]] pv = max(0., min(phimax, pv));
+      real[int] ddp = phi[]; ddp -= phik[]; real dmx = ddp.linfty;
+      phik = phi;
+      if (dmx < 1e-10) break;
+    }
+    Ph dph = phi - phin, ph2 = phi, eph = etaPhi*exp(Qphi/Rgas*(1./T - 1./T0));
+    // recovery by boundary sweeping. recov 0: C_D |dphi| rho_S (original);  1: C_D max(dphi,0) rho_S;
+    // 2: C_D max(dphi,0) tanh(C_A^2 |grad theta_t|^2) rho_S  (Ask et al. 2019, Eqs. 80 and 133: active only behind a sweeping boundary, phi increasing)
+    if (recovMode == 0) { tmp = abs(dph[]); }
+    else { tmp = dph[]; for [i, v : tmp] v = max(v, 0.);
+           if (recovMode == 2) { real[int] gq = gsx; real[int] gq2 = gsy; gq = gq .* gq; gq2 = gq2 .* gq2; gq += gq2; gq *= CA*CA;
+                                 for [i, v : gq] v = tanh(v); tmp = tmp .* gq; } }
+    tmp *= CD; tmp = tmp .* rhoS; drho -= tmp;
+    tmp = dph[] .* dph[]; tmp = tmp .* eph[]; tmp *= 1./dt; Dloc += tmp;
+    Zst = ph2[]; Zst *= 0.5*chi*mu*b*b;
+  } else { Zst = 0.5*chi*mu*b*b; }
+  if (cdStore > 0) {   // Clausius-Duhem cap on storage: Z dStore <= cdstore * sum|tau dgamma|  (inactive in normal plastic flow: Z dStore ~ 0.08 phi tau_c dgamma)
+    real[int] cap = Wpl; cap *= cdStore; tmp = Zst; tmp += 1e-300; cap = cap ./ tmp;
+    real[int] excess = dStore - cap; tmp = abs(excess); excess += tmp; excess *= 0.5;   // max(dStore - cap, 0)
+    drho -= excess; dStore -= excess;
+  }
+  tmp = Zst .* drho; Dloc -= tmp;
+  nnegStep = 0; for [i, dv : Dloc] if (dv < -1e-14) { nneg++; nnegStep++; }
+  dAlgCum += dAlgStep;
+  pa += dpa; pb += dpb; pc += dpc; wst += dwst; rhoS += drho;
+  dpaP = dpa; dpbP = dpb; dpcP = dpc; dwstP = dwst;   // slip predictor for the next step (-slippred)
+  fp11 = tf11; fp12 = tf12; fp21 = tf21; fp22 = tf22;
+  tmp = abs(dpa); pathE += tmp; tmp = abs(dpb); pathE += tmp; tmp = abs(dpc); pathE += tmp; pathP += act;
+  for [i, rv : rhoS] rv = max(rv, 1e-3);
+  mark("commit: SSD storage/recovery, GND, mobile density"); nanE(drho, "SSD increment"); nanE(Dloc, "dissipation");
+  if (dragRho == 3) {   // mobile density: d rho_M = C2 act [rho_M*(rho_F) - rho_M], backward Euler; rho_F at the start of the step
+    real[int] rf = rhoS + rhoG; rf *= 1./rhoFcut; rf = sqrt(rf); rf *= -1; rf += 1; rf *= rhoMsat;   // rho_M* = rho_Msat (1 - sqrt(rho_F/rho_Fcut))
+    for [i, v : rf] v = max(v, rhoMmin);
+    tmp = act; tmp *= C2M; rf = rf .* tmp; rhoM += rf; tmp += 1; rhoM = rhoM ./ tmp;
+    for [i, v : rhoM] v = max(v, rhoMmin);
+  }
+  if (!isA) {
+    kp1 = kq1[]; kp2 = kq2[];
+    tmp = kp1 .* kp1; tmp2 = kp2 .* kp2; tmp += tmp2; rhoG = sqrt(tmp); rhoG *= 1./b;
+  } else {
+    // GND from deformation-induced lattice curvature, weighted by g(phi) = phi^2 so that the
+    // boundary-core curvature (carried by the KWC energy) is not counted as dislocation density
+    if (gndCurl) { real[int] g1(nt), g2(nt); curlFpG(g1, g2); g1 -= GR1; g2 -= GR2; tmp = g1 .* g1; tmp2 = g2 .* g2; tmp += tmp2; rhoG = sqrt(tmp); }
+    else { GT1 = dx(th) - dx(thR); GT2 = dy(th) - dy(thR); tmp = GT1[] .* GT1[]; tmp2 = GT2[] .* GT2[]; tmp += tmp2; rhoG = sqrt(tmp); }
+    if (gndPhi2) rhoG = rhoG .* ph2m; rhoG *= 1./b;   // -gndphi2 0: no phi^2 weight (GND hardening also in the boundary cores)
+  }
+  Dsrc[] = Dloc; Drate = Dloc; Drate *= 1./dt;
+  Dcum += int2d(Th)(Dsrc);
+  // heat
+  Tn = T;
+  real[int] rT = vTr(0, Vh1);
+  mark("commit: heat equation solve");
+  T[] = ATh^-1*rT;
+  { real[int] tt = T[]; int nh = nanE(tt, "temperature"); }
+  if (kwcSpin != 0 && relax) { real Ek = elasticEnergy(); real pmn = phi[].min; cout << "SPIN " << n << " " << n*kwcSpin*180/pi << " " << pmn << " " << Ek << endl; }
+  if (isA && n == nrelax) {
+    { string sv = out; saveCk(n); exec("cp " + out + "_ck.txt " + out + "_relaxed_ck.txt"); if (kwcField) exec("cp " + out + "_ck.txt.thk " + out + "_relaxed_ck.txt.thk"); if (mucDual) exec("cp " + out + "_ck.txt.lam " + out + "_relaxed_ck.txt.lam"); }
+    V = 0; Acc = 0; Wext = 0; Dcum = 0; nneg = 0; T = T0; Tn = T0;   // interface relaxation heat is an initialization artefact
+    rhoS = rho0;   // sweeping recovery during the zero-load relaxation is also an initialization artefact
+    rhoM = rho0;
+    thR = th; rhoG = 0;   // GND counts lattice curvature produced after relaxation only
+    if (gndCurl) curlFpG(GR1, GR2);   // (-gndcurl) incompatibility present at the end of relaxation is the reference
+    E0 = kinU() + kinT() + elasticEnergy() + storedEnergy() + heat();
+    cout << "relaxation done: E0=" << E0 << " min phi=" << phi[].min << endl;
+    writeVTK("relaxed");
+  }
+  if (!relax || n == nrelax) {
+    mark("output: energies, log, diag, VTK, checkpoint");
+    real KEu = kinU(), KEt = kinT(), Ee = elasticEnergy(), Es = storedEnergy(), Q = heat();
+    real res = Wext - (KEu + KEt + Ee + Es + Q - E0);
+    real[int] sl = abs(pa); tmp = abs(pb); sl += tmp; tmp = abs(pc); sl += tmp;
+    Ph slp; slp[] = sl;
+    real meanslip = int2d(Th)(slp)/100.;
+    Ph rs; rs[] = rhoS; real meanrho = int2d(Th)(rs)/100.;
+    Vh1 thv = th; real thmaxdeg = max(thv[].max, -thv[].min)*180/pi;   // (fixed: th[] alone is the full vector incl. u)
+    log << n << "," << t << "," << Tload << "," << it << "," << locres << "," << KEu << "," << KEt << "," << Ee << "," << Es << ","
+        << Q << "," << Wext << "," << Dcum << "," << res << "," << sl.max << "," << meanslip << "," << (T[].max - T0) << ","
+        << thmaxdeg << "," << meanrho << "," << rhoG.max << "," << phi[].min << "," << nneg << endl;
+    log.flush;
+    { real[int] da = Dimp .* areas; real[int] dm = Dmid .* areas; real[int] dh = Dloc .* areas; real[int] ds = Zst .* drho; ds = ds .* areas;
+      tlog << n << "," << t << "," << dh.sum << "," << da.sum << "," << dm.sum << "," << dAlgCum << "," << nnegStep << "," << Dloc.min << "," << ds.sum/dt << "," << cdStore << endl; tlog.flush; }
+    if (diagon) {   // worst elements of this step
+      real[int] act = abs(dpa); tmp = abs(dpb); act += tmp; tmp = abs(dpc); act += tmp;
+      real[int] lr = abs(ra); tmp = abs(rb); for [i, v : lr] v = max(v, tmp[i]); tmp = abs(rc); for [i, v : lr] v = max(v, tmp[i]);
+      Ph phe = phi; real[int] gx = gsx; real[int] gy = gsy;
+      int[int] ks = [act.imax, lr.imax, Dloc.imax];
+      string[int] tg = ["maxslipinc", "maxlocres", "maxD"];
+      for (int q = 0; q < 3; q++) { int k = ks[q];
+        real xk = xcen[][k], yk = ycen[][k];
+        dlog << n << "," << t << "," << tg[q] << "," << k << "," << Th[k].label << "," << xk << "," << yk << "," << min(min(xk, 10 - xk), min(yk, 10 - yk)) << ","
+             << phe[][k] << "," << sqrt(gx[k]^2 + gy[k]^2) << "," << rhoG[k] << "," << rhoS[k] << "," << act[k] << "," << lr[k] << ","
+             << tstar[k] << "," << dwst[k] << "," << tauc[k] << "," << etad[k] << "," << Dloc[k] << "," << (T[].max - T0) << "," << rhoMob[k] << "," << max(eEa[k], max(eEb[k], eEc[k])) << "," << max(abs(ta[k]), max(abs(tb[k]), abs(tcc[k]))) << "," << act[k]/dt/(rhoMob[k]*b) << endl; }
+      dlog.flush;
+    }
+    if (n % 50 == 0) cout << "step " << n << " t=" << t << " it=" << it << " KE=" << KEu << " Wext=" << Wext << " res=" << res
+                          << " maxslip=" << sl.max << " dTmax=" << (T[].max - T0) << "  wall=" << (clock() - clk0) << " s" << endl;
+  }
+  real tt = t + 1e-9;
+  if (!relax && (abs(t - 2) < dt/2 || abs(t - 5) < dt/2 || abs(t - 7) < dt/2 || abs(t - 10) < dt/2 || abs(t - tend) < dt/2))
+    writeVTK("t" + lrint(t*100));
+  if (!relax && vtkevery > 0) { if ((n - (isA ? nrelax : 0)) % vtkevery == 0) writeVTK("s" + (n - (isA ? nrelax : 0))); }   // (no short-circuit &&)
+  if (nanHit) {   // NaN during the commit of this step: do not overwrite any checkpoint with it
+    { ofstream fn(out + "_NAN.txt", append); fn << "stopped during the commit of step " << n << "; restart from the last regular or rolling checkpoint (" << out << "_ck.txt / _ckroll*.txt)" << endl; }
+    cout << "NaN during commit of step " << n << ": stopped without writing a checkpoint" << endl; break; }
+  if (mucDual) lamS = lamNext;
+  mark("output: checkpoints");
+  if (n % ckevery == 0 || n == ntot) saveCk(n);
+  if (ckRoll > 0) { if (n % ckRoll == 0) saveCkF(n, out + "_ckroll" + ((n/ckRoll) % 2) + ".txt"); }   // (FreeFem && does not short-circuit: no n % 0)
+  if (!relax && (!(T[].max < tstop) || !(T[].max > 0))) {
+    writeVTK("tstop" + n); saveCk(n);
+    { ofstream ft(out + "_TSTOP.txt"); ft << "stopped at step " << n << " t=" << t << " ns: max T = " << T[].max << " K exceeded tstop = " << tstop << " K (or NaN)" << endl; }
+    cout << "TSTOP at step " << n << " t=" << t << " max T=" << T[].max << endl; break; }
+  if (clock() - clk0 > walllimit) { saveCk(n); cout << "wall limit reached at step " << n << "; checkpoint written" << endl; break; }
+}
+cout << "done. wall time " << (clock() - clk0) << " s;  unconverged steps " << nfail << ", retries " << nretry << ", line-search halvings " << lsTot << ", steps converged on du only (residual floor) " << nDuOnly << ", ILU factorizations " << nPre << ", GMRES fallbacks " << nLinFall << " (max GMRES residual " << linResMax << ")" << endl;
+if (atoi(arg("-check", "0"))) {
+  // (1) tau_a = -(1/A_e) dE/dgamma_a and tau* = -(1/A_e) dE/dw* at the most stressed element (finite differences)
+  localUpdate(); taus(); setHp();
+  real[int] q = abs(ta); int k = q.imax; real ar = Th[k].area;
+  for (int sys = 0; sys < 4; sys++) {
+    real h = 1e-7;
+    real[int] sva = dpa, svb = dpb, svc = dpc, svw = dwst;
+    if (sys == 0) dpa[k] += h; if (sys == 1) dpb[k] += h; if (sys == 2) dpc[k] += h; if (sys == 3) dwst[k] += h;
+    taus(); setHp(); real Ep = elasticEnergy();
+    dpa = sva; dpb = svb; dpc = svc; dwst = svw;
+    if (sys == 0) dpa[k] -= h; if (sys == 1) dpb[k] -= h; if (sys == 2) dpc[k] -= h; if (sys == 3) dwst[k] -= h;
+    taus(); setHp(); real Em = elasticEnergy();
+    dpa = sva; dpb = svb; dpc = svc; dwst = svw;
+    taus(); setHp();
+    real tt = (sys == 0) ? ta[k] : ((sys == 1) ? tb[k] : ((sys == 2) ? tcc[k] : tstar[k]));
+    cout << "FD check " << (sys < 3 ? "slip " + sys : "spin  ") << ": -dE/dp/area = " << -(Ep - Em)/(2*h)/ar << "  driving force = " << tt << endl;
+  }
+  // (2) internal force = dE/dU along a direction (checks the element-mean finite-strain correction assembly)
+  real[int] dirv(Wh.ndof); for (int i = 0; i < Wh.ndof; i++) dirv[i] = sin(0.37*i + 1.3)*1e-3; dirv = dirv .* mask;
+  kin(); taus(); setHp();
+  real[int] fint = Ktrue*U;
+  rpl = BC11*dP11; fint += rpl; rpl = BC12*dP12; fint += rpl; rpl = BC21*dP21; fint += rpl; rpl = BC22*dP22; fint += rpl; rpl = BCth*dPth; fint += rpl;
+  rpl = B1*hp11[]; fint -= rpl; rpl = B2*hp22[]; fint -= rpl; rpl = B3*hp12[]; fint -= rpl; rpl = Bw*omp[]; fint -= rpl;
+  if (!isA) { rpl = Bk1*kq1[]; fint -= rpl; rpl = Bk2*kq2[]; fint -= rpl; }
+  if (isA) { kwcStress(); rpl = Bg1*mxk; fint += rpl; rpl = Bg2*myk; fint += rpl; }
+  real hU = 1e-4; real[int] U0 = U, dU = dirv; dU *= hU;
+  U = U0; U += dU; u1[] = U; kin(); taus(); real Ep = elasticEnergy();
+  U = U0; U -= dU; u1[] = U; kin(); taus(); real Em = elasticEnergy();
+  U = U0; u1[] = U; kin(); taus();
+  cout << "FD check internal force: dE/dU.d = " << (Ep - Em)/(2*hU) << "   f_int.d = " << (fint'*dirv) << endl;
+}

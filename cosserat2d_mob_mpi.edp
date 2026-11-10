@@ -175,6 +175,7 @@ Wh [u1, u2, th], [v1, v2, ze];
 Vh1 T = T0, Tn = T0, phi = 1., phin = 1., th0s = 0., xi, thR = 0.;
 if (isA) { phi = 0.999; phin = phi; }   // log coupling: start just below phi = 1 (g diverges there)   // thR: GND reference rotation (relaxed state)
 Ph thg0;
+Ph GSX, GSY;   // element orientation gradient used by the KWC terms (see -symfold, symGrad)
 for (int k = 0; k < nt; k++) thg0[][k] = thg(Th[k].label - 1);
 
 // rotated stiffness and Schmid data per element (arrays)
@@ -256,12 +257,31 @@ A11b = s2x .* s2y; A11b *= -1; A12b = s2x .* s2x; A21b = s2y .* s2y; A21b *= -1;
 A11c = s3x .* s3y; A11c *= -1; A12c = s3x .* s3x; A21c = s3y .* s3y; A21c *= -1; A22c = s3x .* s3y;
 
 // ---------------- A: smooth initial orientation field -----------------
+// -symfold 1 (2026-11-01; 0 = old): crystal-symmetry-reduced orientation for the KWC terms.  A second orientation field
+//   theta_s = theta0sym + theta (theta0sym from the smoothed n-fold order parameter, n = -symn, period p = 2 pi/n) is used by
+//   every KWC term (energy, couple stress, KWC tangent, phase-field driving force, Ask recovery factor); its element gradient
+//   takes nodal differences modulo p (minimal-gradient lift), so a jump by a symmetry element and the -180/0 branch cut cost
+//   nothing.  Inertia, Cosserat coupling, elasticity, slip and the GND keep the original theta.  Output: theta_sym_deg in [-p, 0).
+// -symfold 2: complex n-fold order parameter z = exp(i n theta_s) at the nodes (P1); the KWC terms use q = |grad z_h|/n
+//   (smooth, no lift; a one-element jump costs the chord (2/n)|sin(n Delta/2)| instead of the arc); exact chain-rule residual and tangent.
+int symFold = atoi(arg("-symfold", "0"));
+int symN = atoi(arg("-symn", "2"));
+real symP = 2*pi/symN;
+Vh1 th0sym = 0.;
 if (isA) {
   real ls = 0.04;
   PhG thg0G; for (int k = 0; k < ntG; k++) thg0G[][k] = thg(ThG[k].label - 1);
   Vh1G th0sG, xiG;   // global solve on every rank (once), restricted: identical to the serial field
   solve smG(th0sG, xiG) = int2d(ThG)(th0sG*xiG + ls*ls*(dx(th0sG)*dx(xiG) + dy(th0sG)*dy(xiG))) - int2d(ThG)(thg0G*xiG);
   th0s[] = R1*th0sG[];
+  if (symFold) {   // symmetric reference: smooth (cos n theta0, sin n theta0), so boundaries take the short way modulo the period
+    Vh1 c0s, s0s; Ph cg0 = cos(symN*thg0), sg0 = sin(symN*thg0);
+    { Vh1G c0G, s0G; PhG cg0G = cos(symN*thg0G), sg0G = sin(symN*thg0G);   // global solves (as th0s), restricted
+      solve smcG(c0G, xiG) = int2d(ThG)(c0G*xiG + ls*ls*(dx(c0G)*dx(xiG) + dy(c0G)*dy(xiG))) - int2d(ThG)(cg0G*xiG);
+      solve smsG(s0G, xiG) = int2d(ThG)(s0G*xiG + ls*ls*(dx(s0G)*dx(xiG) + dy(s0G)*dy(xiG))) - int2d(ThG)(sg0G*xiG);
+      c0s[] = R1*c0G[]; s0s[] = R1*s0G[]; }
+    th0sym = atan2(s0s, c0s)/symN;
+  }
 } else {
   th0s = 0;
 }
@@ -333,7 +353,7 @@ varf vAall([u1,u2,th],[v1,v2,ze]) =
   + on(LBa, u1 = 0) + on(LBb, u2 = 0) + on(LBc, u2 = 0) + on(LBd, u2 = 0) + on(LBe, u1 = 0) + on(LBf, u2 = 0);
 int curStep = 0, curIt = -1, nanHit = 0; real curT = 0;   // (stage tracking, see mark())
 real tTanEl = 0, tTanAsm = 0, tTanFD = 0, tTanKc = 0, tTanPre = 0;
-matrix Kcons;
+matrix Kcons, Kz;   // Kz: -symfold 2 KWC tangent
 // ---- linear algebra (2026-10-31) ----
 // constant part (linear elastic + Cosserat + F curvature + inertia + Dirichlet penalty) assembled once; per rebuild only the
 // state-dependent part (KWC tangent, EOS correction, consistent element tangent / plastic condensation) is assembled.
@@ -364,7 +384,7 @@ func int buildA() {
     Kconst = K0 + c0*Mu; Kconst = Kconst + c0*Mt; Kconst = Kconst + Ab; haveKconst = true;
   }
   real tk0 = clock();
-  if (tanMode == 1 && kcVarf && consReady) { Aeff = vAall(Wh, Wh); }
+  if (tanMode == 1 && kcVarf && consReady) { Aeff = vAall(Wh, Wh); if (isA && symFold == 2) Aeff = Aeff + Kz; }
   else {
     matrix Kv = vKv(Wh, Wh); Aeff = Kconst + Kv;
     if (tanMode == 1) { if (Kcons.n == Aeff.n) Aeff = Aeff + Kcons; }
@@ -393,8 +413,8 @@ varf vF([u1,u2,th],[v1,v2,ze]) =
              + 4*muc*omp*(rotv(v1,v2) - ze)
              + curvK*(kq1*dx(ze) + kq2*dy(ze)) );
 // KWC couple stress correction (A): -(m_K(grad theta_tot) - Ht grad th).grad ze
-macro gtx() (dx(th0s)+dx(th)) //
-macro gty() (dy(th0s)+dy(th)) //
+macro gtx() GSX //
+macro gty() GSY //
 macro gphi() (-2*(phi + log(1 - phi))) //   (phi is clamped to [0, phimax] at the nodes after every update)
 macro mKfac() (f0*(sK*gphi/sqrt(gtx^2+gty^2+dlt^2) + eK^2)) //
 varf vKWC([a1,a2,a3],[v1,v2,ze]) =
@@ -702,16 +722,72 @@ func int setHp() {
   return 0;
 }
 real locres = 0; int nlocit = 0;
+// -gndcurl 1 (2026-11-01; 0 = old |grad(theta - theta_R)|): GND from the Cermelli-Gurtin dislocation tensor G = Fp Curl Fp
+//   (finite deformation, independent of the orientation field and therefore of its crystal symmetry), rho_G = |G - G_R|/b,
+//   G_R = G at the end of the relaxation (the counterpart of theta_R; saved in <checkpoint>.gnd).
+int gndCurl = atoi(arg("-gndcurl", "0"));
 int gndPhi2 = atoi(arg("-gndphi2", "1"));   // A: 1 = rho_G weighted by phi^2 (original), 0 = rho_G = |grad(th - thR)|/b everywhere
 int diagon = atoi(arg("-diag", "0"));        // 1 = per-step worst-element log <out>_diag.csv
 int recovMode = atoi(arg("-recov", "0"));      // SSD recovery by sweeping: 0 = C_D|dphi| (original), 1 = Heaviside(dphi), 2 = Heaviside(dphi)*tanh(C_A^2|grad theta_t|^2) (Ask 2019)
 real CA = atof(arg("-ca", "3.16227766"));      // um, C_A of Ask et al. 2019 (Table 3: sqrt(10) um)
 Ph xcen = x, ycen = y;
+real[int] gt0x(nt), gt0y(nt);   // gradient of the (non-symmetric) smoothed initial orientation th0s
+{ Ph g0x = dx(th0s), g0y = dy(th0s); gt0x = g0x[]; gt0y = g0y[]; }
+// symmetric orientation gradient: P1 vertex dofs and the inverse element Jacobian (grad = J^-1 [d1, d2] with d_k = theta_k - theta_0)
+int[int] sv0(nt), sv1(nt), sv2(nt); real[int] jgA(nt), jgB(nt), jgC(nt), jgD(nt), gsx(nt), gsy(nt);
+for (int k = 0; k < nt; k++) {
+  sv0[k] = Vh1(k, 0); sv1[k] = Vh1(k, 1); sv2[k] = Vh1(k, 2);
+  real x0 = Th[k][0].x, y0 = Th[k][0].y, xa1 = Th[k][1].x - x0, ya1 = Th[k][1].y - y0, xa2 = Th[k][2].x - x0, ya2 = Th[k][2].y - y0;
+  real dj = xa1*ya2 - ya1*xa2;
+  jgA[k] = ya2/dj; jgB[k] = -ya1/dj; jgC[k] = -xa2/dj; jgD[k] = xa1/dj;
+}
+// element gradient of theta_t: old = dx(th0s + th); -symfold 1 = minimal-gradient lift of theta0sym + th modulo symP
+Vh1 zA, zB;                                   // -symfold 2: nodal cos(n theta_s), sin(n theta_s)
+real[int] gax(nt), gay(nt), gbx(nt), gby(nt), gex(nt), gey(nt);   // element gradients of zA, zB; effective grad theta (output)
+func int symGrad() {
+  if (symFold == 2) {
+    Vh1 tts = th0sym + th; zA = cos(symN*tts); zB = sin(symN*tts);
+    real[int] an = zA[], bnn = zB[];
+    real[int] a0 = an(sv0), a1 = an(sv1), a2 = an(sv2); a1 -= a0; a2 -= a0;
+    real[int] b0 = bnn(sv0), b1 = bnn(sv1), b2 = bnn(sv2); b1 -= b0; b2 -= b0;
+    gax = jgA .* a1; tmp = jgB .* a2; gax += tmp; gay = jgC .* a1; tmp = jgD .* a2; gay += tmp;
+    gbx = jgA .* b1; tmp = jgB .* b2; gbx += tmp; gby = jgC .* b1; tmp = jgD .* b2; gby += tmp;
+    real[int] q = gax .* gax; tmp = gay .* gay; q += tmp; tmp = gbx .* gbx; q += tmp; tmp = gby .* gby; q += tmp; q = sqrt(q); q *= 1./symN;
+    gsx = q; gsy = 0; GSX[] = gsx; GSY[] = gsy;    // magnitude-only uses (energy, phase field, recovery, diag)
+    Ph am = zA, bm = zB;                           // element means of z
+    gex = am[] .* gbx; tmp = bm[] .* gax; gex -= tmp; gex *= 1./symN;   // (a grad b - b grad a)/n = grad theta for smooth fields
+    gey = am[] .* gby; tmp = bm[] .* gay; gey -= tmp; gey *= 1./symN;
+    return 0;
+  }
+  if (!symFold) { gsx = gt0x + gt1; gsy = gt0y + gt2; GSX[] = gsx; GSY[] = gsy; return 0; }
+  Vh1 tts = th0sym + th; real[int] tn = tts[];
+  real[int] t0 = tn(sv0), d1 = tn(sv1), d2 = tn(sv2); d1 -= t0; d2 -= t0;
+  for [i, v : d1] v -= symP*floor(v/symP + 0.5);
+  for [i, v : d2] v -= symP*floor(v/symP + 0.5);
+  real[int] bx(nt), by(nt), bn(nt), cx(nt), cy(nt), cn(nt), msk(nt), e1(nt), e2(nt);
+  bx = jgA .* d1; tmp = jgB .* d2; bx += tmp;                 // baseline: the pre-folded differences (lift m = 0)
+  by = jgC .* d1; tmp = jgD .* d2; by += tmp;
+  bn = bx .* bx; tmp = by .* by; bn += tmp;
+  for (int m1 = -1; m1 <= 1; m1++) for (int m2 = -1; m2 <= 1; m2++) {
+    if (m1 == 0 && m2 == 0) continue;
+    e1 = d1; e1 += m1*symP; e2 = d2; e2 += m2*symP;
+    cx = jgA .* e1; tmp = jgB .* e2; cx += tmp;
+    cy = jgC .* e1; tmp = jgD .* e2; cy += tmp;
+    cn = cx .* cx; tmp = cy .* cy; cn += tmp;
+    tmp = bn; tmp *= (1 - 1e-12); tmp = cn - tmp; msk = abs(tmp); msk += 1e-300; msk = tmp ./ msk; msk *= -0.5; msk += 0.5;   // 1 where strictly smaller
+    for [i, v : msk] v = (v > 0.75 ? 1. : 0.);
+    tmp = cx - bx; tmp = tmp .* msk; bx += tmp; tmp = cy - by; tmp = tmp .* msk; by += tmp;
+    tmp = msk; tmp *= -1; tmp += 1; bn = bn .* tmp; tmp = cn .* msk; bn += tmp;   // assignment form (no cancellation)
+  }
+  gsx = bx; gsy = by; GSX[] = gsx; GSY[] = gsy;
+  return 0;
+}
 func int kin() {   // centroid (= element-mean) kinematics of the current u, theta
   E11 = dx(u1); E22 = dy(u2); E12 = 0.5*(dy(u1) + dx(u2)); WU = 0.5*(dx(u2) - dy(u1)); TH = th;
   Hy1 = dy(u1); Hx2 = dx(u2);
   GT1 = dx(th); GT2 = dy(th);
   e11 = E11[]; e22 = E22[]; e12 = E12[]; wu = WU[]; thc = TH[]; gt1 = GT1[]; gt2 = GT2[]; hy1 = Hy1[]; hx2 = Hx2[];
+  if (isA) symGrad();
   return 0;
 }
 // ---- fully consistent tangent and coupled local Newton (2026-10-31) ----
@@ -995,18 +1071,30 @@ func int fixBCkin(real tt) {   // V, Acc on the prescribed dofs := exact (piston
   return 0;
 }
 // KWC couple stress from element-mean phi^2 (consistent with the energy)
-real[int] gt0x(nt), gt0y(nt), ph2m(nt), gm(nt), mxk(nt), myk(nt), areas(nt);
-{ Ph g0x = dx(th0s), g0y = dy(th0s); gt0x = g0x[]; gt0y = g0y[];
-  varf va(un, w) = int2d(Th)(w); areas = va(0, Ph); }
+real[int] ph2m(nt), gm(nt), mxk(nt), myk(nt), areas(nt);
+{ varf va(un, w) = int2d(Th)(w); areas = va(0, Ph); }
 varf vph2(un, w) = int2d(Th)(phi^2*w);
 varf vgph(un, w) = int2d(Th)(gphi*w);
 // element means of phi^2 (GND weighting) and of the log coupling g(phi) (KWC couple stress)
 func int updatePhi2() { ph2m = vph2(0, Ph); ph2m = ph2m ./ areas; gm = vgph(0, Ph); gm = gm ./ areas; return 0; }
+real[int] facz(nt);   // dpsi/dq / q of the KWC orientation terms (all modes)
 func int kwcStress() {
-  real[int] gx = gt0x + gt1; real[int] gy = gt0y + gt2;
+  real[int] gx = gsx; real[int] gy = gsy;
   real[int] nr = gx .* gx; tmp = gy .* gy; nr += tmp; nr += dlt*dlt; nr = sqrt(nr);
-  real[int] fac = gm ./ nr; fac *= sK; fac += eK*eK; fac *= f0;
-  mxk = fac .* gx; myk = fac .* gy;
+  real[int] fac = gm ./ nr; fac *= sK; fac += eK*eK; fac *= f0; facz = fac;
+  if (symFold == 2) { mxk = fac .* gex; myk = fac .* gey; }   // couple stress for output (the residual uses kwcResZ)
+  else { mxk = fac .* gx; myk = fac .* gy; }
+  return 0;
+}
+// -symfold 2 residual: r_k = sum_e A_e (fac/n) (-b_k grad a_h + a_k grad b_h).grad N_k  -> into rpl (Wh)
+Wh [zw1, zw2, zwA], [zv1, zv2, zwB];   // Wh vectors carrying a (resp. b) at the theta dofs
+func int zWeights() { [zw1, zw2, zwA] = [0, 0, zA]; [zv1, zv2, zwB] = [0, 0, zB]; return 0; }
+func int kwcResZ() {
+  zWeights();
+  real[int] t1 = facz .* gax, t2 = facz .* gay, t3 = facz .* gbx, t4 = facz .* gby;
+  real[int] ra1 = Bg1*t1, w1 = Bg2*t2; ra1 += w1;   // int fac grad a . grad N
+  real[int] rb1 = Bg1*t3; w1 = Bg2*t4; rb1 += w1;   // int fac grad b . grad N
+  ra1 = ra1 .* zv1[]; rb1 = rb1 .* zw1[]; rpl = rb1 - ra1; rpl *= 1./symN;
   return 0;
 }
 func int residual() {
@@ -1015,7 +1103,7 @@ func int residual() {
   rpl = Ktrue*U; rhs -= rpl;
   rpl = BC11*dP11; rhs -= rpl; rpl = BC12*dP12; rhs -= rpl; rpl = BC21*dP21; rhs -= rpl; rpl = BC22*dP22; rhs -= rpl;
   rpl = BCth*dPth; rhs -= rpl;
-  if (isA) { kwcStress(); rpl = Bg1*mxk; rhs -= rpl; rpl = Bg2*myk; rhs -= rpl; }
+  if (isA) { kwcStress(); if (symFold == 2) { kwcResZ(); rhs -= rpl; } else { rpl = Bg1*mxk; rhs -= rpl; rpl = Bg2*myk; rhs -= rpl; } }
   rhs = rhs .* mask;
   return 0;
 }
@@ -1215,10 +1303,31 @@ func int nanV(real[int] & a, string what) {
   if (mpirank == 0) cout << "NaN/Inf in " << what << " (stage: " << curStage << ")" << endl;
   return 1;
 }
+// -symfold 2 KWC tangent (exact):  K = A_e{ (psi''-psi'/q) dq_k dq_l + (psi'/q) cos n(theta_k-theta_l) gradN_k.gradN_l
+//   - delta_kl (psi'/q)(a_k grad a + b_k grad b).gradN_k },  psi'/q = fac,  psi''-psi'/q = cc q^2,
+//   dq_k = (-b_k grad a + a_k grad b).gradN_k/(n q)
+Ph zfac, zcm, zXx, zXy, zYx, zYy;
+varf vZL([u1,u2,th],[v1,v2,ze]) = int2d(Th, qft = qf1pT)( zfac*(dx(th)*dx(ze) + dy(th)*dy(ze)) );
+varf vZM([u1,u2,th],[v1,v2,ze]) = int2d(Th, qft = qf1pT)( zcm*(zYx*dx(th) + zYy*dy(th))*(zXx*dx(ze) + zXy*dy(ze)) );
+func int buildKz(real[int] & fac, real[int] & cc) {
+  zWeights();
+  matrix DA = zw1[], DB = zv1[];
+  zfac[] = fac; matrix L = vZL(Wh, Wh);
+  matrix T1 = DA*L; T1 = T1*DA; matrix T2 = DB*L; T2 = T2*DB; Kz = T1 + T2;
+  zcm[] = cc; zcm[] *= 1./(symN*symN);
+  zXx[] = gax; zXy[] = gay; zYx[] = gax; zYy[] = gay; matrix Maa = vZM(Wh, Wh); T1 = DB*Maa; T1 = T1*DB; Kz = Kz + T1;
+  zXx[] = gax; zXy[] = gay; zYx[] = gbx; zYy[] = gby; matrix Mab = vZM(Wh, Wh); T1 = DB*Mab; T1 = T1*DA; Kz = Kz + (-1.)*T1;
+  zXx[] = gbx; zXy[] = gby; zYx[] = gax; zYy[] = gay; matrix Mba = vZM(Wh, Wh); T1 = DA*Mba; T1 = T1*DB; Kz = Kz + (-1.)*T1;
+  zXx[] = gbx; zXy[] = gby; zYx[] = gbx; zYy[] = gby; matrix Mbb = vZM(Wh, Wh); T1 = DA*Mbb; T1 = T1*DA; Kz = Kz + T1;
+  real[int] t1 = fac .* gax, t2 = fac .* gay, t3 = fac .* gbx, t4 = fac .* gby;
+  real[int] da = Bg1*t1, w1 = Bg2*t2; da += w1; real[int] db = Bg1*t3; w1 = Bg2*t4; db += w1;
+  da = da .* zw1[]; db = db .* zv1[]; da += db; da *= -1.; matrix Dd = da; Kz = Kz + Dd;
+  return 0;
+}
 func int refreshTangent() {
   if (isA) {
     updatePhi2();
-    real[int] gx = gt0x + gt1; real[int] gy = gt0y + gt2;
+    real[int] gx = gsx; real[int] gy = gsy;
     real[int] nr = gx .* gx; tmp = gy .* gy; nr += tmp; nr += dlt*dlt; nr = sqrt(nr);
     // consistent KWC tangent: f0*s*phi2/n*(I - g g/n^2) + f0*s*phi2*dlt^2/n^3 * g g/n^2 ... written as
     // H = a I + c g(x)g,  a = f0(s gbar/n + e^2),  c = -f0 s gbar/n^3   (gbar = element mean of g(phi))
@@ -1227,6 +1336,7 @@ func int refreshTangent() {
     tmp = gx .* gx; tmp = tmp .* cc; tmp += aH; H11[] = tmp;
     tmp = gy .* gy; tmp = tmp .* cc; tmp += aH; H22[] = tmp;
     tmp = gx .* gy; tmp = tmp .* cc; H12[] = tmp;
+    if (symFold == 2) { H11 = 0; H12 = 0; H22 = 0; buildKz(aH, cc); }
   }
   string st0 = curStage;
   if (tanMode == 1) {
@@ -1327,10 +1437,11 @@ func int writeVTK(string tag) {
     dpa = sva; dpb = svb; dpc = svc; dwst = svw;
     Wh [w1, w2, wth]; w1[] = V;                        // velocities (u_dot, theta_dot)
     Vh1 thdeg = th*180/pi, thtot = (th0s + th)*180/pi, thdot = wth, vx = w1, vy = w2;
+    Vh1 thsym = th0s + th; if (symFold) { thsym = th0sym + th; thtot = thsym*180/pi; } for [i, v : thsym[]] v = (v - symP*floor(v/symP + 1.))*180/pi;   // folded into [-p, 0)
     if (!isA) { Vh1 g0; toP1(th0d, g0[]); thtot = g0 + th*180/pi; }   // F: grain angle (P1-averaged) + rotation
     // MPI: gather to the global mesh (P1 vertex values = what savevtk writes for order 1; P0 owned elements)
     Vh1 lu1 = u1, lu2 = u2;
-    Vh1G Gu1, Gu2, Gvx, Gvy, Gthdeg, Gthtot, Gthdot, GT, Gphi;
+    Vh1G Gu1, Gu2, Gvx, Gvy, Gthdeg, Gthtot, Gthsym, Gthdot, GT, Gphi;
     Gu1[] = gath1(lu1[]); Gu2[] = gath1(lu2[]); Gvx[] = gath1(vx[]); Gvy[] = gath1(vy[]); Gthdeg[] = gath1(thdeg[]); Gthtot[] = gath1(thtot[]);
     Gthdot[] = gath1(thdot[]); GT[] = gath1(T[]); Gphi[] = gath1(phi[]);
     PhG g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13, g14, g15, g16, g17, g18, g19, g20, g21, g22, g23, g24, g25, g26, g27, g28, g29, g30, g31;
@@ -1338,12 +1449,12 @@ func int writeVTK(string tag) {
     g9[] = gathE(f9[]); g10[] = gathE(f10[]); g11[] = gathE(f11[]); g12[] = gathE(f12[]); g13[] = gathE(f13[]); g14[] = gathE(f14[]); g15[] = gathE(f15[]); g16[] = gathE(f16[]);
     g17[] = gathE(f17[]); g18[] = gathE(f18[]); g19[] = gathE(f19[]); g20[] = gathE(f20[]); g21[] = gathE(f21[]); g22[] = gathE(f22[]); g23[] = gathE(f23[]); g24[] = gathE(f24[]);
     g25[] = gathE(f25[]); g26[] = gathE(f26[]); g27[] = gathE(f27[]); g28[] = gathE(f28[]); g29[] = gathE(f29[]); g30[] = gathE(f30[]); g31[] = gathE(f31[]);
-    int[int] ord(38); ord = 0; ord(0:6) = 1;           // order is per field: 7 P1 fields, then 31 P0 fields
+    int[int] ord(39); ord = 0; ord(0:7) = 1;           // order is per field: 8 P1 fields, then 31 P0 fields
     if (mpirank == 0)
-    savevtk(out + "_" + tag + ".vtu", ThG, [Gu1, Gu2, 0], [Gvx, Gvy, 0], Gthdeg, Gthtot, Gthdot, GT, Gphi,
+    savevtk(out + "_" + tag + ".vtu", ThG, [Gu1, Gu2, 0], [Gvx, Gvy, 0], Gthdeg, Gthtot, Gthsym, Gthdot, GT, Gphi,
             g1, g2, g3, g4, g5, g6, g7, g8, g9, g10, g11, g12, g13, g14, g15, g16, g17, g18, g19,
             g20, g21, g22, g23, g24, g25, g26, g27, g28, g29, g30, g31,
-            dataname = "u v dtheta_deg theta_lattice_deg theta_dot T phi p1 p2 p3 slip_path_eff slip_path_phys rhoS rhoG kp_x kp_y wstar tau_c tau_1 tau_2 tau_3 sig_11 sig_22 sig_12 sig_21 sig_33 m_x m_y D_rate Fp_11 Fp_12 "
+            dataname = "u v dtheta_deg theta_lattice_deg theta_sym_deg theta_dot T phi p1 p2 p3 slip_path_eff slip_path_phys rhoS rhoG kp_x kp_y wstar tau_c tau_1 tau_2 tau_3 sig_11 sig_22 sig_12 sig_21 sig_33 m_x m_y D_rate Fp_11 Fp_12 "
     + "Fp_21 Fp_22 w_cosserat J psi_elastic rho_mob eta_drag",
             order = ord, bin = true, floatsol = true, floatmesh = true);
     // ParaView time-series collection
@@ -1351,6 +1462,23 @@ func int writeVTK(string tag) {
     if (mpirank == 0) { ofstream f(out + ".pvd");
       f << "<?xml version=\"1.0\"?>\n<VTKFile type=\"Collection\" version=\"0.1\">\n  <Collection>\n" << pvd << "  </Collection>\n</VTKFile>\n"; }
   }
+  return 0;
+}
+// ---- GND from Curl Fp (-gndcurl 1) ----
+// weak nodal curl per row j of Fp: c_j = d1 Fp_j2 - d2 Fp_j1,  int c_j w = -int (Fp_j2 dw/dx - Fp_j1 dw/dy) + int_dOmega (Fp_j2 n1 - Fp_j1 n2) w,
+// lumped P1 mass; element mean of c; G_i = Fp_ij c_j (reference curl, Cermelli-Gurtin G = Fp Curl Fp)
+real[int] GR1(nt), GR2(nt); GR1 = 0; GR2 = 0;
+Ph fpA, fpB;
+varf vCurlFp(un, w) = int2d(Th)(-(fpA*dx(w) - fpB*dy(w))) + int1d(Th, 1, 2, 3, 4)((fpA*N.x - fpB*N.y)*w);
+func int syncP1(real[int] & a) { real[int] aa = a, ap; ChangeNumbering(Ap1, aa, ap); ChangeNumbering(Ap1, aa, ap, inverse = true, exchange = true); a = aa; return 0; }   // MPI: owner values on the overlap
+real[int] lumpS = lump; syncP1(lumpS);
+func int curlFpG(real[int] & g1, real[int] & g2) {
+  Vh1 c1, c2;
+  fpA[] = fp12; fpB[] = fp11; c1[] = vCurlFp(0, Vh1); syncP1(c1[]); c1[] = c1[] ./ lumpS;
+  fpA[] = fp22; fpB[] = fp21; c2[] = vCurlFp(0, Vh1); syncP1(c2[]); c2[] = c2[] ./ lumpS;
+  Ph c1e = c1, c2e = c2;
+  g1 = fp11 .* c1e[]; tmp = fp12 .* c2e[]; g1 += tmp;
+  g2 = fp21 .* c1e[]; tmp = fp22 .* c2e[]; g2 += tmp;
   return 0;
 }
 // ---------------- time loop ---------------------------------------------
@@ -1482,6 +1610,8 @@ func int saveCkF(int n, string fn) {   // MPI: gathered to the global mesh, writ
     }
     { ofstream f(fn + ".rhoM"); f.precision(17); f << n << endl << eM; }   // mobile density (side file: the main checkpoint format is unchanged)
   }
+  if (gndCurl) { real[int] q1 = gathE(GR1), q2 = gathE(GR2);
+    if (mpirank == 0) { ofstream f(fn + ".gnd"); f.precision(17); f << n << endl << q1 << q2; } }   // Curl-Fp GND reference (side file)
   return 0;
 }
 func int saveCk(int n) { return saveCkF(n, out + "_ck.txt"); }
@@ -1506,6 +1636,12 @@ if (restart != "") {
     else { real[int] rf = rhoS + rhoG; real[int] q = rf; q *= 1./rhoFcut; q = sqrt(q); q *= -1; q += 1; q *= rhoMsat;
            for [i, v : q] v = max(rhoMmin, min(v, rf[i])); rhoM = q; if (dragRho == 3) if (mpirank == 0) cout << "rho_M initialised quasi-steady (no side file)" << endl; }
   }
+  if (gndCurl) {   // Curl-Fp GND reference: side file <restart>.gnd; the relaxed checkpoint recomputes it below (relaxfix reset)
+    int ng = -1;
+    if (exec("test -s " + restart + ".gnd") == 0) { ifstream fg(restart + ".gnd"); fg >> ng; if (ng == nn) { real[int] q1(ntG), q2(ntG); fg >> q1 >> q2; GR1 = q1(n2o); GR2 = q2(n2o); } }
+    if (ng == nn) if (mpirank == 0) cout << "GND reference read from " << restart << ".gnd" << endl;
+    else if (!(isA && nn == nrelax)) if (mpirank == 0) cout << "WARNING: -gndcurl 1 but no " << restart << ".gnd for step " << nn << ": GND reference set to 0" << endl;
+  }
   if (mpirank == 0) cout << "restarted from " << restart << " at step " << nstart << " t=" << t << endl;
   // keep the ParaView time series written before the restart
   { ifstream fp(out + ".pvd"); string ln;
@@ -1517,6 +1653,7 @@ if (restart != "") {
   if (isA && nn == nrelax && atoi(arg("-relaxfix", "1"))) {
     V = 0; Acc = 0; Wext = 0; Dcum = 0; nneg = 0; T = T0; Tn = T0;
     rhoS = rho0; rhoM = rho0; thR = th; rhoG = 0; didReset = true;
+    if (gndCurl) curlFpG(GR1, GR2);
     if (mpirank == 0) cout << "relaxfix: end-of-relaxation reset applied to the relaxed checkpoint" << endl;
   }
   if (bcKin && !(isA && nn < nrelax)) { real[int] va = V .* bcm, aa = Acc .* bcm; fixBCkin(t);
@@ -1541,7 +1678,7 @@ if (nstart == 0 && mpirank == 0) {
   f << " \"hardening\": {\"tau0\": " << tau0 << ", \"lambda_T\": " << lamT << ", \"mu\": " << mu << ", \"b_um\": " << b << ", \"rho0_um2\": " << rho0 << ", \"K\": " << Kkmt << ", \"d_um\": " << dkmt << ", \"chi\": " << chi << ", \"alpha_mu\": " << alphaMu << "},\n";
   f << " \"rate\": {\"gdot0_per_ns\": " << g0 << ", \"m\": " << mexp << ", \"B0_GPa_ns\": " << B0 << "},\n";
   f << " \"mobile_drag\": {\"dragrho\": " << dragRho << ", \"vc_um_per_ns\": " << vcrel << ", \"c1c2c3_MR\": [" << c1MR << ", " << c2MR << ", " << c3MR << "], \"rhoMsat\": " << rhoMsat << ", \"C2M\": " << C2M << ", \"rhoFcut\": " << rhoFcut << ", \"rhoMmin\": " << rhoMmin << ", \"eta_d\": \"B0 (T/T0)/(b^2 rho_m) [sqrt(1+(b tau/(v_c B))^2) if v_c>0]\"},\n";
-  f << " \"robustness\": {\"exactexp\": " << exactExp << ", \"spinmax\": " << spinMax << ", \"spinbranch\": " << spinBranch << ", \"bckin\": " << bcKin << ", \"predictor\": \"" << predName << "\", \"onfail\": \"" << onFail << "\", \"maxit\": " << maxit << ", \"maxitretry\": " << maxitRetry << ", \"ckroll\": " << ckRoll << ", \"dissip_implicit\": " << dissImp << ", \"cdstore\": " << cdStore << ", \"softmin\": " << softMin << "},\n";
+  f << " \"robustness\": {\"exactexp\": " << exactExp << ", \"spinmax\": " << spinMax << ", \"spinbranch\": " << spinBranch << ", \"bckin\": " << bcKin << ", \"symfold\": " << symFold << ", \"symn\": " << symN << ", \"gndcurl\": " << gndCurl << ", \"predictor\": \"" << predName << "\", \"onfail\": \"" << onFail << "\", \"maxit\": " << maxit << ", \"maxitretry\": " << maxitRetry << ", \"ckroll\": " << ckRoll << ", \"dissip_implicit\": " << dissImp << ", \"cdstore\": " << cdStore << ", \"softmin\": " << softMin << "},\n";
   f << " \"elastic_law\": {\"eos\": \"" << eosName << "\", \"K0_GPa\": " << K0eos << ", \"Kprime\": " << Kpeos << ", \"voltan\": " << volTan << "},\n";
   f << " \"tangent\": {\"mode\": \"" << tanName << "\", \"fdk\": " << fdK << ", \"fdq\": " << fdQ << ", \"polish\": " << nPolish << "},\n";
   f << " \"mpi\": {\"ranks\": " << mpisize << ", \"overlap\": 1, \"petsc\": \"" << elOpt << "\"},\n";
@@ -1670,7 +1807,7 @@ for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
     // 2: C_D max(dphi,0) tanh(C_A^2 |grad theta_t|^2) rho_S  (Ask et al. 2019, Eqs. 80 and 133: active only behind a sweeping boundary, phi increasing)
     if (recovMode == 0) { tmp = abs(dph[]); }
     else { tmp = dph[]; for [i, v : tmp] v = max(v, 0.);
-           if (recovMode == 2) { real[int] gq = gt0x + gt1; real[int] gq2 = gt0y + gt2; gq = gq .* gq; gq2 = gq2 .* gq2; gq += gq2; gq *= CA*CA;
+           if (recovMode == 2) { real[int] gq = gsx; real[int] gq2 = gsy; gq = gq .* gq; gq2 = gq2 .* gq2; gq += gq2; gq *= CA*CA;
                                  for [i, v : gq] v = tanh(v); tmp = tmp .* gq; } }
     tmp *= CD; tmp = tmp .* rhoS; drho -= tmp;
     tmp = dph[] .* dph[]; tmp = tmp .* eph[]; tmp *= 1./dt; Dloc += tmp;
@@ -1703,7 +1840,9 @@ for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
   } else {
     // GND from deformation-induced lattice curvature, weighted by g(phi) = phi^2 so that the
     // boundary-core curvature (carried by the KWC energy) is not counted as dislocation density
-    GT1 = dx(th) - dx(thR); GT2 = dy(th) - dy(thR); tmp = GT1[] .* GT1[]; tmp2 = GT2[] .* GT2[]; tmp += tmp2; rhoG = sqrt(tmp); if (gndPhi2) rhoG = rhoG .* ph2m; rhoG *= 1./b;   // -gndphi2 0: no phi^2 weight (GND hardening also in the boundary cores)
+    if (gndCurl) { real[int] g1(nt), g2(nt); curlFpG(g1, g2); g1 -= GR1; g2 -= GR2; tmp = g1 .* g1; tmp2 = g2 .* g2; tmp += tmp2; rhoG = sqrt(tmp); }
+    else { GT1 = dx(th) - dx(thR); GT2 = dy(th) - dy(thR); tmp = GT1[] .* GT1[]; tmp2 = GT2[] .* GT2[]; tmp += tmp2; rhoG = sqrt(tmp); }
+    if (gndPhi2) rhoG = rhoG .* ph2m; rhoG *= 1./b;   // -gndphi2 0: no phi^2 weight (GND hardening also in the boundary cores)
   }
   Dsrc[] = Dloc; Drate = Dloc; Drate *= 1./dt;
   Dcum += gsum(int2d(Th)(ownP*Dsrc));
@@ -1719,8 +1858,9 @@ for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
     rhoS = rho0;   // sweeping recovery during the zero-load relaxation is also an initialization artefact
     rhoM = rho0;
     thR = th; rhoG = 0;   // GND counts lattice curvature produced after relaxation only
+    if (gndCurl) curlFpG(GR1, GR2);   // (-gndcurl) incompatibility present at the end of relaxation is the reference
     E0 = kinU() + kinT() + elasticEnergy() + storedEnergy() + heat();
-    if (mpirank == 0) cout << "relaxation done: E0=" << E0 << " min phi=" << gmin(phi[].min) << endl;
+    { real gpm = gmin(phi[].min); if (mpirank == 0) cout << "relaxation done: E0=" << E0 << " min phi=" << gpm << endl; }
     writeVTK("relaxed");
   }
   if (!relax || n == nrelax) {
@@ -1743,7 +1883,7 @@ for (int n = nstart + 1; n <= min(ntot, stepsmax); n++) {
     if (diagon) {   // worst elements of this step
       real[int] act = abs(dpa); tmp = abs(dpb); act += tmp; tmp = abs(dpc); act += tmp;
       real[int] lr = abs(ra); tmp = abs(rb); for [i, v : lr] v = max(v, tmp[i]); tmp = abs(rc); for [i, v : lr] v = max(v, tmp[i]);
-      Ph phe = phi; real[int] gx = gt0x + gt1; real[int] gy = gt0y + gt2;
+      Ph phe = phi; real[int] gx = gsx; real[int] gy = gsy;
       real[int] gtn = gx .* gx; tmp = gy .* gy; gtn += tmp; gtn = sqrt(gtn);
       real[int] eEm = eEa; for [i, v : eEm] v = max(v, max(eEb[i], eEc[i]));
       real[int] tam = abs(ta); tmp = abs(tb); for [i, v : tam] v = max(v, tmp[i]); tmp = abs(tcc); for [i, v : tam] v = max(v, tmp[i]);

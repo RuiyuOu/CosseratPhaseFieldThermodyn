@@ -224,3 +224,6 @@ Examples (MPI):
     RUNTAG=bk ANGLE=90 bash run_all_A_mpi.sh        # pure shear
     RUNTAG=bk ANGLE=0 bash run_all_A_mpi.sh         # pure compression with the plate BCs
     MPI=1 RUNTAG=bk ANGLE=45 bash resume_all_A.sh   # resume; ANGLE=confined for the earlier confined-piston bk series
+
+### tau / temperature / mismatch statistics in the post step (added 2026-11-08)
+`run_post_piston_mob.sbatch` and `run_post_piston_mob_mpi.sbatch` now also run `post/tau_stats.py` on `out_<tag>` (after grain_post) and write `tau_<tag>/` (per-snapshot CSV, `tau_summary.csv`, `tau_vs_time.png`); `package.sh` copies it to `deliver_<tag>/tau/` (optional 6th argument). It reports tau_1..3 and tau_c, T, pressure, the heating-jump time/rate, the Cosserat mismatch beta = phi_e - theta and the solver log's `max_abs_dtheta_deg`. Env: `TAUWIN0/TAUWIN1` (loading window, default 0.5-30 ns), `TAUMARK` (event marker, default 6 ns), `TAUEVERY` (every N-th snapshot). A failure does not affect the animations. Only syntax-checked (sbatch) and tested on synthetic data (package.sh, tau_stats.py); not run on Longleaf.

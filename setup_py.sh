@@ -5,6 +5,6 @@ set -e
 python3 -m venv $HOME/dynpost_venv
 source $HOME/dynpost_venv/bin/activate
 pip install --upgrade pip
-pip install numpy scipy matplotlib meshio pillow
-python3 -c "import numpy, scipy, matplotlib, meshio, PIL; print('post-processing deps OK')"
+pip install numpy scipy matplotlib meshio pillow pandas
+python3 -c "import numpy, scipy, matplotlib, meshio, PIL, pandas; print('post-processing deps OK')"
 which zip || echo "WARNING: 'zip' not found; package.sh needs it (module load zip, or ask admins)"

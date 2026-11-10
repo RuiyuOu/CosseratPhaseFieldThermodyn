@@ -1,0 +1,18 @@
+#!/bin/bash
+#SBATCH -J grainSum
+#SBATCH -p general
+#SBATCH -N 1
+#SBATCH -n 1
+#SBATCH --mem=4G
+#SBATCH -t 00:30:00
+#SBATCH -o logs/grainSum_%j.log
+# Cross-run grain summary (refinement factor, grain count, mean size +- std, VL/L/H misorientation) for angles x speeds.
+# Reads grains_<tag>/ made by the post arrays; missing runs are skipped. Env: PFX (default pistM3v2GRcVQ3_gc_ne_pm1e-2_es1_mpi), ANGLES, UPS, MISOR (sym|raw), AREA (territory|plateau), SMOOTH
+set -uo pipefail
+cd "$SLURM_SUBMIT_DIR"
+module purge; module load python3 2>/dev/null || true
+[ -f "$HOME/dynpost_venv/bin/activate" ] && source "$HOME/dynpost_venv/bin/activate"
+python3 -c "import numpy, pandas, matplotlib" || { echo "FAILED: source ~/dynpost_venv/bin/activate; pip install pandas"; exit 1; }
+PFX=${PFX:-pistM3v2GRcVQ3_gc_ne_pm1e-2_es1_mpi}
+python3 post/grain_summary.py --root . --prefix grains_$PFX --angles ${ANGLES:-0 45 90} --ups ${UPS:-25 50 100 150 250 400} \
+  --misor ${MISOR:-sym} --area ${AREA:-territory} --smooth ${SMOOTH:-1} --tavg ${TAVG:-0} --out grain_summary_$PFX
