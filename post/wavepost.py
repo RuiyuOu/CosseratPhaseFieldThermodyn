@@ -1,8 +1,7 @@
-"""Post-processing of dense snapshots of the finite-deformation variant-A run.
-Derived fields (all documented in SMOOTHING.md):
+"""Post-processing helpers for the solver snapshots (mesh, frame list, derived fields; documented in DATA_FIELDS.md):
   div v, curl v           element gradient of the P1 nodal velocity (constant per triangle)
   pressure p, shear stress  from the P0 Cauchy stress at element-mean kinematics
-  GND from curl Fp        nodal recovery of the P0 Fp, optional screened-Poisson smoothing, element curl
+  GND density             the solver's Cermelli-Gurtin rhoG = |G - G_R|/b, G = Fp Curl Fp (cell field, converted to m^-2)
 """
 import numpy as np, meshio, scipy.sparse as sp, scipy.sparse.linalg as spl, glob, re, os, json
 B_UM = 2.556e-4   # Burgers vector, um
@@ -22,24 +21,6 @@ class Mesh:
         den = (A2).repeat(3)
         self.Gx = sp.csr_matrix(((b.ravel()/den), (rows, cols)), shape=(self.nt, self.nn))
         self.Gy = sp.csr_matrix(((c.ravel()/den), (rows, cols)), shape=(self.nt, self.nn))
-        # nodal recovery R: P0 -> P1, area-weighted patch average (lumped L2 projection)
-        W = sp.csr_matrix((np.repeat(self.A, 3), (cols, rows)), shape=(self.nn, self.nt))
-        self.R = sp.diags(1.0/np.asarray(W.sum(1)).ravel()) @ W
-        # P1 stiffness / mass for the screened-Poisson smoother
-        K = sp.csr_matrix((self.nn, self.nn)); Mm = sp.csr_matrix((self.nn, self.nn))
-        Kloc = np.zeros((self.nt, 3, 3)); gx = b/ A2[:,None]; gy = c/A2[:,None]
-        Kloc = (gx[:,:,None]*gx[:,None,:] + gy[:,:,None]*gy[:,None,:]) * self.A[:,None,None]
-        Mloc = (np.ones((3,3)) + np.eye(3))[None] * (self.A/12.0)[:,None,None]
-        I = np.repeat(self.tri, 3, axis=1).ravel(); J = np.tile(self.tri, (1,3)).ravel()
-        self.K = sp.csr_matrix((Kloc.ravel(), (I, J)), shape=(self.nn, self.nn))
-        self.M = sp.csr_matrix((Mloc.ravel(), (I, J)), shape=(self.nn, self.nn))
-        self._lu = {}
-    def smooth(self, q, ell):
-        """screened Poisson (I - ell^2 Laplacian) q~ = q, natural BC, P1 FEM"""
-        if ell <= 0: return q
-        if ell not in self._lu:
-            self._lu[ell] = spl.splu((self.M + ell**2*self.K).tocsc())
-        return self._lu[ell].solve(self.M @ q)
 
 def load(vtu, mesh):
     m = meshio.read(vtu)
@@ -50,11 +31,11 @@ def load(vtu, mesh):
              T=m.point_data['T'].ravel(), phi=m.point_data['phi'].ravel(), thl=m.point_data['theta_lattice_deg'].ravel())
     for k in ['sig_33','sig_11','sig_22','sig_12','sig_21','Fp_11','Fp_12','Fp_21','Fp_22','rhoG','slip_path_eff','slip_path_phys','rhoS','wstar','D_rate','J','p1','p2','p3','Label']:
         d[k] = g(k)
-    for k in ['rho_mob', 'eta_drag']:   # cosserat2d_mob.edp only (mobile density used in the drag, effective low-stress drag)
+    for k in ['rho_mob', 'eta_drag']:   # drag density rho_m and low-stress drag eta_d (cell data)
         if k in m.cell_data: d[k] = g(k)
     return d
 
-def derived(mesh, d, ell=0.04):
+def derived(mesh, d):
     o = {}
     vx, vy = d['v'][:, 0], d['v'][:, 1]
     o['divv'] = mesh.Gx @ vx + mesh.Gy @ vy           # 1/ns
@@ -64,16 +45,7 @@ def derived(mesh, d, ell=0.04):
     o['sigF'] = np.sqrt(d['sig_11']**2 + d['sig_22']**2 + d['sig_12']**2 + d['sig_21']**2 + d['sig_33']**2)*1e3   # Frobenius norm, MPa
     o['umag'] = np.hypot(d['u'][:, 0], d['u'][:, 1])*1e3   # nm
     o['dT'] = d['T'] - 300.0
-    # GND from curl Fp: (curl Fp)_{i} = d_1 Fp_{i2} - d_2 Fp_{i1}
-    def rec(name): return mesh.smooth(mesh.R @ d[name], ell)
-    F11, F12, F21, F22 = [rec(n) for n in ('Fp_11','Fp_12','Fp_21','Fp_22')]
-    c1 = mesh.Gx @ F12 - mesh.Gy @ F11
-    c2 = mesh.Gx @ F22 - mesh.Gy @ F21
-    o['gnd_curl'] = np.hypot(c1, c2)/B_UM*1e12          # m^-2  (alpha magnitude / b)
-    o['gnd_curl_x'], o['gnd_curl_y'] = c1, c2
-    F11r, F12r, F21r, F22r = [mesh.R @ d[n] for n in ('Fp_11','Fp_12','Fp_21','Fp_22')]
-    o['gnd_curl_raw'] = np.hypot(mesh.Gx @ F12r - mesh.Gy @ F11r, mesh.Gx @ F22r - mesh.Gy @ F21r)/B_UM*1e12
-    o['gnd_solver'] = d['rhoG']*1e12
+    o['gnd'] = d['rhoG']*1e12                          # solver's Cermelli-Gurtin GND density, um^-2 -> m^-2
     for k in ('slip_path_eff','slip_path_phys','p1','p2','p3'): o[k] = d[k]
     o['thl'] = d['thl']
     return o

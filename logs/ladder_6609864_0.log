@@ -1,3 +1,0 @@
-task 0: compression 0.1 GPa, shear 0.01 GPa, tag lad_P100MPa_S10MPa
-./run_comp.sh: line 34: syntax error near unexpected token `('
-./run_comp.sh: line 34: `  { echo "STALLED: no new steps beyond step $S0 (solver exit code $RC) at $(date)"; echo "--- last lines of $D/$B.out ---"; tail -n 25 $D/$B.out; } | tee $D/STALLED'

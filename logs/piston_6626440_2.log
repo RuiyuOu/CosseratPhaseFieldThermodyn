@@ -1,2 +1,0 @@
-task 2: piston u_p = 100 m/s, tend 30 ns
-[2026-10-26T11:49:39.329] error: *** JOB 6626449 ON c130503 CANCELLED AT 2026-10-26T11:49:39 DUE to SIGNAL Terminated ***

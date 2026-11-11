@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Grain-evolution summary figures from grain_post.py outputs (grains_<tag>/).
+"""Grain-evolution summary figures from grain_post.py outputs (deliver_<tag>/grains/).
 
 Per run (grain_history.csv + grain_table_all.csv):
   refinement factor  R(t)  = d0 / d(t),  d = mean equivalent-circle diameter of grain territories
@@ -11,9 +11,9 @@ Per run (grain_history.csv + grain_table_all.csv):
                      (--misor sym [default, cubic/90-deg reduced] | raw)
 
 Usage
-  python3 grain_summary.py grains_A grains_B ... --out summary          # any list of run folders
+  python3 grain_summary.py deliver_A/grains deliver_B/grains ... --out summary   # any list of grain folders
   python3 grain_summary.py --root .. --angles 0 45 90 --ups 25 50 100 150 250 400 --out ../summary_ladder
-Options: --prefix grains_pistM3v2GRcVQ3_gc_ne_pm1e-2_es1_mpi   --smooth N (running mean, frames)
+Options: --prefix deliver --suffix _<RUNTAG>   (folders <prefix>_a<A>_up<U>ms<suffix>/grains)   --smooth N (running mean, frames)
          --t0 (reference time for N0,d0; default first frame)
 Main output: end_grid.png = angle x velocity grids of end-of-run values (--tavg N averages the last N ns).
 Outputs: per-run  <out>/<tag>_summary.png ; with --lines  <out>/compare_a<ANGLE>_{metrics,misorient}.png
@@ -25,7 +25,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-PFX = "grains_pistM3v2GRcVQ3_gc_ne_pm1e-2_es1_mpi"
+PFX = "deliver"
 BINS = [("<2", "<2°", "#9a9a9a"), ("[2,5)", "VL 2–5°", "#4c78a8"),
         ("[5,15)", "L 5–15°", "#f2a541"), (">=15", "H >15°", "#c0392b")]
 
@@ -104,7 +104,7 @@ def run_fig(h, tag, out, sm, area, misor):
 
 
 def parse(tag):
-    m = re.search(r"_a(\d+)_up(\d+)ms", tag)
+    m = re.search(r"(?:^|_)a(\d+)_up(\d+)ms", tag)
     return (int(m.group(1)), int(m.group(2))) if m else (None, None)
 
 
@@ -196,7 +196,7 @@ def grid_fig(runs, out, tavg, ups, angs, misor, area, size=(12.8, 7.2), suptitle
             ax.axvline(.5, color="k", lw=2)
         ax.set_xticks(range(len(ups) + off), (["t=0"] if off else []) + [str(u) for u in ups])
         ax.set_yticks(range(len(angs)), [f"{a}°" for a in angs])
-        ax.set_xlabel("piston speed [m/s]" + ("  (end of run)" if off else ""), fontsize=11)
+        ax.set_xlabel("plate speed [m/s]" + ("  (end of run)" if off else ""), fontsize=11)
         ax.set_ylabel("angle", fontsize=11)
         ax.tick_params(labelsize=11)
         if k == "d_mean" and init:
@@ -220,6 +220,7 @@ def main():
     ap.add_argument("dirs", nargs="*")
     ap.add_argument("--root", default=None)
     ap.add_argument("--prefix", default=PFX)
+    ap.add_argument("--suffix", default="", help="tag suffix after _up<U>ms (e.g. _gm for RUNTAG=gm, _serial)")
     ap.add_argument("--angles", type=int, nargs="*", default=[0, 45, 90])
     ap.add_argument("--ups", type=int, nargs="*", default=[25, 50, 100, 150, 250, 400])
     ap.add_argument("--out", default="grain_summary")
@@ -237,17 +238,21 @@ def main():
     if a.root:
         for A in a.angles:
             for U in a.ups:
-                d = os.path.join(a.root, f"{a.prefix}_a{A}_up{U}ms")
-                if os.path.isdir(d) and os.path.exists(os.path.join(d, "grain_history.csv")):
-                    dirs.append(d)
+                base = os.path.join(a.root, f"{a.prefix}_a{A}_up{U}ms{a.suffix}")
+                for d in (os.path.join(base, "grains"), base):   # deliver_<tag>/grains, or an older grains_<tag>/ folder
+                    if os.path.exists(os.path.join(d, "grain_history.csv")):
+                        dirs.append(d); break
                 else:
-                    print(f"[skip] missing {d}", file=sys.stderr)
+                    print(f"[skip] missing {base}/grains", file=sys.stderr)
     if not dirs:
         sys.exit("no run folders found")
     os.makedirs(a.out, exist_ok=True)
     runs, tab = [], []
     for d in dirs:
-        tag = re.sub(r"^grains_", "", os.path.basename(os.path.normpath(d)))
+        nd = os.path.normpath(d)
+        tag = os.path.basename(nd)
+        if tag == "grains": tag = os.path.basename(os.path.dirname(os.path.abspath(nd)))   # deliver_<tag>/grains
+        tag = re.sub(r"^(grains|deliver)_", "", tag)
         try:
             h = derived(load(d, a.area, a.misor), a.t0)
         except Exception as e:

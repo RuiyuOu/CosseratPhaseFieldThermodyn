@@ -1,7 +1,6 @@
 #!/bin/bash
 # usage: bash package.sh <animout> <dest> [<datadir> <zipname> [<grain_dir> [<tau_dir>]]]   (paths may be relative; they are made absolute first)
 set -e
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$(cd "$1" && pwd)"; mkdir -p "$2"; DST="$(cd "$2" && pwd)"
 GR=""; [ -n "${5:-}" ] && [ -d "$5" ] && GR="$(cd "$5" && pwd)"   # optional 5th argument: grain-count output directory
 TA=""; [ -n "${6:-}" ] && [ -d "$6" ] && TA="$(cd "$6" && pwd)"   # optional 6th argument: tau_stats.py output directory
@@ -19,7 +18,6 @@ S.save(f'{dst}/{k}_contact_sheet.png')
 P
   cp "$k.gif" "$DST/"
 done
-cp "$HERE/SMOOTHING.md" "$DST/"
 # raw data zip
 if [ -n "$3" ]; then (cd "$3" && zip -qr "$DST/$4" . -x '*.out'); fi
 # grain count / boundary misorientation history (post/grain_post.py)

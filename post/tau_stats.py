@@ -27,7 +27,8 @@ usage:
   python3 tau_stats.py path/to/file.vtu            (a single snapshot)
 RUN_DIR holds the <tag>_s*.vtu files (and normally <tag>.pvd).  Several run directories are compared in one figure.
 Output (in --out, default ./tau_post): tau_stats_<tag>.csv (one row per snapshot and selection), tau_summary.csv (one row per run:
-peaks and window means), tau_vs_time.png and, for several runs, tau_compare.png.
+peaks and window means), tau_vs_time.png (all panels) and each panel alone (tau_stress, tau_slip_systems, tau_temperature,
+tau_mismatch .png; with several runs suffixed _<tag>, plus tau_compare.png and tau_compare_{p99,median}.png).
 Needs numpy, meshio and (for the figures) matplotlib; no FreeFem, no pandas.
 """
 import argparse, csv, glob, os, re, sys
@@ -342,7 +343,7 @@ def summarise(tag, rows, window):
 
 
 # ------------------------------------------------------------------ figures
-def make_plots(allrows, outdir, thr_ref, window, marks, logs=None):
+def make_plots(allrows, outdir, thr_ref, window, logs=None):
     logs = logs or {}
     try:
         import matplotlib
@@ -352,14 +353,12 @@ def make_plots(allrows, outdir, thr_ref, window, marks, logs=None):
         sys.stderr.write("matplotlib missing: no figures\n")
         return
     runs = list(allrows.keys())
-    # per run figure(s): tau_max statistics and tau_c, and the three systems
-    fig, axs = plt.subplots(len(runs), 4, figsize=(22, 3.6 * len(runs)), squeeze=False)
-    for i, tag in enumerate(runs):
-        a = [r for r in allrows[tag] if r["selection"] == "all" and r.get("n_elem") and not np.isnan(r["t_ns"])]
-        if not a:
-            continue
-        t = np.array([r["t_ns"] for r in a])
-        ax = axs[i, 0]
+
+    def rows(tag):
+        return [r for r in allrows[tag] if r["selection"] == "all" and r.get("n_elem") and not np.isnan(r["t_ns"])]
+
+    # one function per panel: each is drawn into the combined figure and again into a figure of its own
+    def p_stress(ax, tag, a, t, leg):
         ax.plot(t, [r["taumax_max"] for r in a], color="0.2", lw=1.0, label="max")
         ax.plot(t, [r["taumax_p99"] for r in a], color="C3", lw=1.4, label="99th percentile")
         ax.plot(t, [r["taumax_median"] for r in a], color="C0", lw=1.4, label="median")
@@ -370,21 +369,22 @@ def make_plots(allrows, outdir, thr_ref, window, marks, logs=None):
         if window:
             ax.axvspan(window[0], window[1], color="0.9", zorder=0)
         ax.set_ylabel(r"$\max_a|\tau_a|$ per element (GPa)")
-        ax.set_xlabel("t (ns)")
         ax.set_title(tag, fontsize=8)
-        ax.grid(alpha=0.25)
-        if i == 0:
+        if leg:
             ax.legend(fontsize=7, ncol=2)
-        ax = axs[i, 1]
+        return [ax]
+
+    def p_systems(ax, tag, a, t, leg):
         for k in (1, 2, 3):
             ax.plot(t, [r["tau%d_absp99" % k] for r in a], lw=1.2, label=r"$\tau_%d$ p99 of $|\tau_%d|$" % (k, k))
-        ax.set_xlabel("t (ns)")
         ax.set_ylabel("GPa")
-        ax.grid(alpha=0.25)
         ax.set_title("per slip system", fontsize=8)
-        if i == 0:
+        if leg:
             ax.legend(fontsize=7)
-        ax = axs[i, 2]
+        return [ax]
+
+    def p_temperature(ax, tag, a, t, leg):
+        out = [ax]
         if "T_max" in a[0]:
             ax.plot(t, [r["T_max"] for r in a], color="C3", lw=1.3, label="T max")
             ax.plot(t, [r["T_p99"] for r in a], color="C1", lw=1.2, label="T p99")
@@ -392,59 +392,91 @@ def make_plots(allrows, outdir, thr_ref, window, marks, logs=None):
             ax.set_ylabel("T (K)")
             jump = heating_jump(t, np.array([r["T_mean"] for r in a]))
             if jump:
-                ax.axvline(jump[0], color="C3", ls="--", lw=0.8)
                 ax.set_title("largest rise of mean T at %.2f ns (%.1f K/ns)" % jump, fontsize=8)
             if "pressure_p99" in a[0]:
-                ax2 = ax.twinx()
+                ax2 = ax.twinx(); out.append(ax2)
                 ax2.plot(t, [r["pressure_p99"] for r in a], color="0.4", lw=0.9, ls=":", label="pressure p99")
                 ax2.set_ylabel("pressure p99 (GPa)", color="0.4")
-            if i == 0:
+            if leg:
                 ax.legend(fontsize=7, loc="upper left")
-        ax.set_xlabel("t (ns)")
-        ax.grid(alpha=0.25)
-        ax = axs[i, 3]
+        return out
+
+    def p_mismatch(ax, tag, a, t, leg):
+        out = [ax]
         if "beta_absmax_deg" in a[0]:
             ax.semilogy(t, np.maximum([r["beta_absmax_deg"] for r in a], 1e-6), color="C3", lw=1.3, label=r"$|\beta|$ max")
             ax.semilogy(t, np.maximum([r["beta_absp99_deg"] for r in a], 1e-6), color="C1", lw=1.2, label=r"$|\beta|$ p99")
             ax.semilogy(t, np.maximum([r["beta_absmedian_deg"] for r in a], 1e-6), color="C0", lw=1.2, label=r"$|\beta|$ median")
             ax.set_ylabel(r"mismatch $\beta=\varphi_e-\theta$ (deg)")
-            ax2 = ax.twinx()
+            ax2 = ax.twinx(); out.append(ax2)
             ax2.plot(t, [r["dtheta_absmax_deg"] for r in a], color="0.35", lw=1.0, ls=":", label="max|dtheta| (VTU)")
             if tag in logs:
                 ax2.plot(logs[tag]["t_ns"], logs[tag]["max_abs_dtheta_deg"], color="0.1", lw=0.9, label="max_abs_dtheta_deg (log)")
             ax2.set_ylabel("rotation (deg)", color="0.35")
-            if i == 0:
+            if leg:
                 ax.legend(fontsize=7, loc="upper left")
                 ax2.legend(fontsize=7, loc="lower right")
+        return out
+
+    PANELS = (("stress", p_stress), ("slip_systems", p_systems), ("temperature", p_temperature), ("mismatch", p_mismatch))
+
+    def finish(axes_drawn, ax):
         ax.set_xlabel("t (ns)")
         ax.grid(alpha=0.25)
-        for tm in marks:
-            for aa in axs[i]:
-                aa.axvline(tm, color="0.5", ls="-.", lw=0.8)
+
+    # combined figure: one row per run, the four panels side by side
+    fig, axs = plt.subplots(len(runs), 4, figsize=(22, 3.6 * len(runs)), squeeze=False)
+    for i, tag in enumerate(runs):
+        a = rows(tag)
+        if not a:
+            continue
+        t = np.array([r["t_ns"] for r in a])
+        for j, (name, fn) in enumerate(PANELS):
+            finish(fn(axs[i, j], tag, a, t, i == 0), axs[i, j])
     fig.tight_layout()
     fig.savefig(os.path.join(outdir, "tau_vs_time.png"), dpi=140)
     plt.close(fig)
+    # every panel on its own: tau_<panel>.png (one run) or tau_<panel>_<tag>.png (several runs)
+    for tag in runs:
+        a = rows(tag)
+        if not a:
+            continue
+        t = np.array([r["t_ns"] for r in a])
+        for name, fn in PANELS:
+            fig, ax = plt.subplots(figsize=(6.4, 4.2))
+            finish(fn(ax, tag, a, t, True), ax)
+            fig.tight_layout()
+            fig.savefig(os.path.join(outdir, "tau_%s%s.png" % (name, "" if len(runs) == 1 else "_" + tag)), dpi=140)
+            plt.close(fig)
     if len(runs) > 1:
-        fig, axs = plt.subplots(1, 2, figsize=(12, 4.2))
-        for tag in runs:
-            a = [r for r in allrows[tag] if r["selection"] == "all" and r.get("n_elem") and not np.isnan(r["t_ns"])]
-            if not a:
-                continue
-            v, ang = run_label(tag)
-            lab = ("%s m/s" % v if v is not None else tag) + (" a%s" % ang if ang is not None else "")
-            t = np.array([r["t_ns"] for r in a])
-            axs[0].plot(t, [r["taumax_p99"] for r in a], lw=1.3, label=lab)
-            axs[1].plot(t, [r["taumax_median"] for r in a], lw=1.3, label=lab)
-        for ax, ttl in zip(axs, ("99th percentile of $\\max_a|\\tau_a|$ (GPa)", "median of $\\max_a|\\tau_a|$ (GPa)")):
+        COMP = (("taumax_p99", "99th percentile of $\\max_a|\\tau_a|$ (GPa)", "p99"), ("taumax_median", "median of $\\max_a|\\tau_a|$ (GPa)", "median"))
+        def p_compare(ax, key, ttl, leg):
+            for tag in runs:
+                a = rows(tag)
+                if not a:
+                    continue
+                v, ang = run_label(tag)
+                lab = ("%s m/s" % v if v is not None else tag) + (" a%s" % ang if ang is not None else "")
+                ax.plot([r["t_ns"] for r in a], [r[key] for r in a], lw=1.3, label=lab)
             if thr_ref:
                 ax.axhline(thr_ref, color="k", ls=":", lw=1)
             ax.set_xlabel("t (ns)")
             ax.set_ylabel(ttl)
             ax.grid(alpha=0.25)
-        axs[0].legend(fontsize=7)
+            if leg:
+                ax.legend(fontsize=7)
+        fig, axs = plt.subplots(1, 2, figsize=(12, 4.2))
+        for k, (key, ttl, _) in enumerate(COMP):
+            p_compare(axs[k], key, ttl, k == 0)
         fig.tight_layout()
         fig.savefig(os.path.join(outdir, "tau_compare.png"), dpi=140)
         plt.close(fig)
+        for key, ttl, nm in COMP:
+            fig, ax = plt.subplots(figsize=(6.4, 4.2))
+            p_compare(ax, key, ttl, True)
+            fig.tight_layout()
+            fig.savefig(os.path.join(outdir, "tau_compare_%s.png" % nm), dpi=140)
+            plt.close(fig)
 
 
 # ------------------------------------------------------------------ main
@@ -462,7 +494,7 @@ def main():
     ap.add_argument("--all-tags", action="store_true", help="also read snapshots whose time cannot be determined")
     ap.add_argument("--ref", type=float, default=0.5, help="reference line in the figures (GPa), 0 = none")
     ap.add_argument("--tend", type=float, default=30.0, help="expected end time (ns); warn if the series stops earlier (0 = no check)")
-    ap.add_argument("--mark", type=float, nargs="*", default=[], help="times (ns) to mark in the figures, e.g. --mark 6")
+    ap.add_argument("--mark", type=float, nargs="*", default=[], help=argparse.SUPPRESS)   # ignored; still accepted for post jobs queued before 2026-11-11
     ap.add_argument("--log", nargs="*", default=[], metavar="CSV",
                     help="solver log CSV(s), one per run path in the same order ('-' to skip one); their t_ns and max_abs_dtheta_deg are overlaid and summarised")
     ap.add_argument("--no-plots", action="store_true")
@@ -519,7 +551,7 @@ def main():
             sys.stdout.write("  window %s: mean p99=%.3f, mean median=%.3f, mean max=%.3f GPa\n" % (
                 s["window"], s["window_mean_taumax_p99"], s["window_mean_taumax_median"], s["window_mean_taumax_max"]))
     if allrows and not args.no_plots:
-        make_plots(allrows, args.out, args.ref if args.ref > 0 else None, args.window, args.mark, logs)
+        make_plots(allrows, args.out, args.ref if args.ref > 0 else None, args.window, logs)
     sys.stdout.write("wrote %s\n" % args.out)
 
 

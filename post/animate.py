@@ -5,7 +5,7 @@ from matplotlib.colors import LogNorm
 from multiprocessing import Pool
 import wavepost as w
 from PIL import Image
-D = sys.argv[1]; OUT = sys.argv[2]; ELL = float(sys.argv[3]) if len(sys.argv) > 3 else 0.04
+D = sys.argv[1]; OUT = sys.argv[2]
 MAG = 400.0   # replaced by auto value in limits(): max displaced shift = 8% of block size
 FR = w.frame_list(D, os.environ.get('BASE', 'A_dyn')); M = w.Mesh(FR[0][1])
 # name: (title, key, cmap, symmetric?, log?, unit)
@@ -25,16 +25,15 @@ ANIMS = {
  'slip_sys3': ('Accumulated signed slip $\\gamma_3$ (system 3)', 'p3', 'RdBu_r', True, False, 'shear strain'),
  'rotation': ('Lattice rotation since the relaxed state: $\\theta_{lat}(t)-\\theta_{lat}(0)$', 'rot', 'RdBu_r', True, False, 'deg'),
  'lattice_slip': ('Lattice orientation + slip directions', 'thl', 'twilight_shifted', False, False, 'deg'),
- 'gnd_curl': ('GND from curl $F^p$: $|\\mathrm{curl}F^p|/b$', 'gnd_curl', 'magma', False, True, 'm$^{-2}$'),
- 'gnd_solver': ('GND from solver: $\\phi^2|\\nabla\\theta-\\nabla\\theta_R|/b$', 'gnd_solver', 'magma', False, True, 'm$^{-2}$'),
+ 'gnd':      ('GND density (Cermelli-Gurtin): $|G-G_R|/b$, $G=F^p\\,\\mathrm{Curl}\\,F^p$', 'gnd', 'magma', False, True, 'm$^{-2}$'),
 }
 _d0 = w.load(FR[0][1], M); THL0 = _d0['thl'].copy()   # reference orientation for the 'rotation' field
-if 'rho_mob' in _d0:   # mobile-drag runs (cosserat2d_mob.edp): add the drag fields
+if 'rho_mob' in _d0:   # drag fields (always written by cosserat_kwc.edp)
     ANIMS['rho_mob'] = ('Mobile dislocation density $\\rho_m$ used in the drag', 'rho_mob', 'magma', False, True, 'm$^{-2}$')
     ANIMS['eta_drag'] = ('Drag $\\eta_d=B(T)/(b^2\\rho_m)$ (low-stress, before the $v_c$ factor)', 'eta_drag', 'viridis', False, True, 'Pa s')
 NODAL = {'phi','thdot','dT','umag'}
 def get(i):
-    t, f = FR[i]; d = w.load(f, M); o = w.derived(M, d, ELL); o['phi'] = d['phi']; o['thdot'] = d['thdot']
+    t, f = FR[i]; d = w.load(f, M); o = w.derived(M, d); o['phi'] = d['phi']; o['thdot'] = d['thdot']
     o['u'] = d['u']; o['rot'] = ((o['thl'] - THL0 + 180.0) % 360.0) - 180.0
     if 'rho_mob' in d: o['rho_mob'] = d['rho_mob']*1e12; o['eta_drag'] = d['eta_drag']   # um^-2 -> m^-2; GPa ns = Pa s
     return t, o
@@ -85,9 +84,10 @@ def render(a):
         lo, hi = LIM[k]; v = o[key]
         fig, ax = plt.subplots(figsize=(5.6, 5.0), dpi=110)
         P = M.p.copy()
-        if k == 'deformation': P = P + MAG*o['u']   # u in um already? (u stored um; MAG*u)
+        if k == 'deformation': P = P + MAG*o['u']   # u in um, magnified MAG times
         tr = mtri.Triangulation(P[:, 0], P[:, 1], M.tri)
         v = ((v + 90.0) % 180.0) - 90.0 if k == 'lattice_slip' else v
+        if lg: v = np.maximum(v, lo)   # zero (e.g. no GND) shows as the lowest colour, not as blank
         kw = dict(cmap=cm, norm=LogNorm(lo, hi)) if lg else dict(cmap=cm, vmin=lo, vmax=hi)
         pc = ax.tripcolor(tr, v, **kw, shading='flat') if len(v) == M.nt else ax.tripcolor(tr, v, **kw, shading='gouraud')
         ax.set_aspect('equal'); ax.set_xlabel('x (µm)'); ax.set_ylabel('y (µm)')
