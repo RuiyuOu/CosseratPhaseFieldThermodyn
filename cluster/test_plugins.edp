@@ -1,0 +1,12 @@
+// test_plugins.edp -- plugins used by the solvers (serial FreeFem++). A failed load stops FreeFEM with an error naming the plugin.
+load "msh3"
+load "tetgen"
+load "iovtk"
+load "IncompleteCholesky"
+cout << "plugins: msh3 tetgen iovtk IncompleteCholesky loaded" << endl;
+mesh3 Th = cube(4, 4, 4);
+fespace Vh(Th, P2);
+Vh u = x*y*z;
+cout << "3D P2 test: int u = " << int3d(Th)(u) << " (exact 0.125)" << endl;
+cout << "FreeFEM version " << version << endl;
+cout << "PLUGIN TEST OK" << endl;

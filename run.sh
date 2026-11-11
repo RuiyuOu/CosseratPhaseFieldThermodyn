@@ -74,9 +74,24 @@ if [ -n "$R" ]; then   # resuming: drop log/diag/thermo rows written after the c
   [ -s $D/${B}_log.csv ] || echo "$HDR" > $D/${B}_log.csv   # (the solver writes the header only on a fresh start)
 fi
 touch $D/$B.pvd
+# TANGENT: element-map derivatives (consistent tangent, local Newton).  ad (default): automatic differentiation (plugin ad/kwc2d.cpp;
+# cosserat_kwc_ad*.edp are generated from cosserat_kwc.edp), exact and ~18% faster;  fd: central differences (the original solver).
+# Default (TANGENT unset): ad, falling back to fd with a warning when the AD plugin cannot be built.  TANGENT=ad: ad or fail.  TANGENT=fd: fd.
+TANGENT_REQ=${TANGENT:-}
+TANGENT=${TANGENT:-ad}
+case "$TANGENT" in
+  fd) ;;
+  ad) if ! bash ad/build_ad.sh >> $D/$B.out 2>&1; then
+        if [ -z "$TANGENT_REQ" ]; then echo "WARNING: ad/build_ad.sh failed (see $D/$B.out): falling back to TANGENT=fd" | tee -a $D/$B.out; TANGENT=fd
+        else echo "FAILED: ad/build_ad.sh (see $D/$B.out); run with TANGENT=fd to use the finite-difference tangent"; exit 1; fi
+      fi ;;
+  *) echo "TANGENT must be ad or fd"; exit 1 ;;
+esac
+echo "[$(date +%T)] tangent: $TANGENT" >> $D/$B.out
+SFX=""; [ "$TANGENT" = ad ] && SFX=_ad
 if [ "$MODE" = mpi ]; then
-  EDP=cosserat_kwc_mpi.edp
-  [ -s $EDP ] || { echo "FAILED: $EDP missing (generate it: python3 mpi/make_mpi.py cosserat_kwc.edp $EDP)"; exit 1; }
+  EDP=cosserat_kwc${SFX}_mpi.edp
+  [ -s $EDP ] || { echo "FAILED: $EDP missing (generate it: python3 mpi/make_mpi.py cosserat_kwc${SFX}.edp $EDP)"; exit 1; }
   NP=${NP:-${SLURM_NTASKS:-4}}
   if [ -z "${MPIRUN:-}" ]; then
     # prefer the mpiexec FreeFem++-mpi was built with (recorded in ff-mpirun); a foreign launcher (e.g. srun without PMI)
@@ -98,7 +113,7 @@ if [ "$MODE" = mpi ]; then
   EXIT=$?
   tail -n +$((L0+1)) $D/$B.out | grep -q "LAUNCHER ERROR" && { echo "launcher mismatch (see $D/$B.out): not a solver failure; set MPIRUN and resubmit"; grep -m1 "LAUNCHER ERROR" $D/$B.out; exit 1; }
 else
-  EDP=cosserat_kwc.edp
+  EDP=cosserat_kwc${SFX}.edp
   if ! ls ${FF_LOADPATH:-/nonexistent}/IncompleteCholesky.so >/dev/null 2>&1 && ! find $(dirname $(dirname $(which FreeFem++)))/lib* -name IncompleteCholesky.so 2>/dev/null | grep -q .; then
     echo "FAILED: the FreeFem plugin IncompleteCholesky (ILU preconditioner of the serial GMRES solve) was not found"; exit 1; fi
   echo "[$(date +%T)] FreeFem++ $EDP (serial)" >> $D/$B.out

@@ -4,3 +4,18 @@ out_*/
 anim_*/
 deliver_*/
 grain_summary*/
+# AD variant (generated / built by ad/build_ad.sh)
+kwc2d.so
+cosserat_kwc_ad.edp
+cosserat_kwc_ad_mpi.edp
+ad/build.log
+ad/.build.lock
+ad/check/
+# AD variant (generated / built by ad/build_ad.sh)
+kwc2d.so
+cosserat_kwc_ad.edp
+cosserat_kwc_ad_mpi.edp
+ad/build.log
+ad/.build.lock
+ad/check/
+mpi/kwc2d.so

@@ -1,0 +1,28 @@
+// test_petsc.edp -- FreeFEM + PETSc installation test (run with 4 MPI ranks: see test_install.sbatch).
+// -lap u = 1 on the unit square, u = 0 on the boundary, P1 on a distributed mesh; three PETSc solvers must give max u = 0.07367 (exact 0.0736713...)
+load "PETSc"
+macro dimension()2// EOM
+include "macro_ddm.idp"
+if (mpirank == 0) cout << "test_petsc: " << mpisize << " MPI rank(s)" << endl;
+mesh Th = square(120, 120);
+buildDmesh(Th)
+Mat A; createMat(Th, A, P1)
+fespace Vh(Th, P1);
+varf vP(u, v) = int2d(Th)(dx(u)*dx(v) + dy(u)*dy(v)) + int2d(Th)(v) + on(1, 2, 3, 4, u = 0);
+A = vP(Vh, Vh, tgv = -1);
+real[int] b = vP(0, Vh, tgv = -1);
+string[int] solv = ["-ksp_type cg -pc_type gamg -ksp_rtol 1e-12", "-ksp_type preonly -pc_type lu -pc_factor_mat_solver_type mumps", "-ksp_type cg -pc_type hypre -ksp_rtol 1e-12"];
+string[int] name = ["CG + GAMG", "MUMPS (direct)", "CG + hypre BoomerAMG"];
+real[int] ref; int ok = 1;
+for (int i = 0; i < solv.n; i++) {
+  set(A, sparams = solv[i]);
+  Vh u; u[] = A^-1*b;
+  real mx = u[].max, g; mpiAllReduce(mx, g, mpiCommWorld, mpiMAX);
+  real d = 0;
+  if (i == 0) { ref.resize(u[].n); ref = u[]; }
+  else { real[int] e = u[] - ref; real dl = e.linfty; mpiAllReduce(dl, d, mpiCommWorld, mpiMAX); }
+  bool good = abs(g - 0.07367) < 2e-4 && d < 1e-8;
+  if (!good) ok = 0;
+  if (mpirank == 0) cout << "test_petsc: " << name[i] << ": max u = " << g << (i > 0 ? ", max |u - u_GAMG| = " + d : "") << (good ? "  ok" : "  WRONG") << endl;
+}
+if (mpirank == 0) cout << (ok && mpisize > 1 ? "PETSC TEST OK" : (mpisize == 1 ? "PETSC TEST FAILED: only 1 rank (launcher does not match the MPI of FreeFem++-mpi)" : "PETSC TEST FAILED")) << endl;
