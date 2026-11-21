@@ -1,0 +1,147 @@
+[20:38:27] HOST c130603 | AMD EPYC 7742 64-Core Processor | job 9878804 cpus 67,71,74,76,82-86,100,106,111,113,117,119,120,195,199,202,204,210-214,228,234,239,241,245,247,248 = 16 physical cores for 16 ranks | load 152.46 173.64 190.44 | step 0
+[20:38:27] code version 7.5
+[20:38:28] /nas/longleaf/rhel9/apps/openmpi/5.0.6/gcc12/bin/mpiexec -n 16 --bind-to none FreeFem++-mpi cosserat_kwc_v2_mpi.edp (16 ranks)
+GND measure: Cermelli-Gurtin g = c/Jp (planar curl of Fp), rho_G = |g|/b, no reference subtraction
+plate impact: up=0 ut=0.4 um/ns  j=0 um^2  muc=754  dt=0.01  steps=3100  nt=58391  ndof=263775  MPI ranks=16 (rank-0 subdomain nt=3795)
+no out_a90_up400ms_v2_kt3pcg/a90_up400ms_v2_kt3pcg_ck.txt.mult for step 100: multiplier / dual flux start cold
+rho_M initialised quasi-steady (no side file)
+NOTE: no usable out_a90_up400ms_v2_kt3pcg/a90_up400ms_v2_kt3pcg_ck.txt.plate for step 100 (missing, other step, unrecognised layout or incomplete): the plate-work ledger and audit_full are UNAVAILABLE for the first step after the restart (nan) and start from a new baseline after it
+restarted from out_a90_up400ms_v2_kt3pcg/a90_up400ms_v2_kt3pcg_ck.txt at step 100 t=0
+relaxfix: end-of-relaxation reset applied to the relaxed checkpoint
+bckin: prescribed-dof kinematics reset on restart (max |v| 0, max |a| 0 before)
+relaxfix: E0=0.037444
+step 150 t=0.5 it=7 KE=3.67603 Wext=0 res=-7.17612 maxslip=0.00983145 dTmax=8.74646  wall=363.287 s (cpu 346.801 s)
+step 200 t=1 it=8 KE=12.555 Wext=0 res=-24.5132 maxslip=0.0319066 dTmax=42.5122  wall=830.33 s (cpu 793.788 s)
+step 250 t=1.5 it=9 KE=20.1177 Wext=0 res=-39.8349 maxslip=0.0701614 dTmax=98.1939  wall=1371.82 s (cpu 1312.5 s)
+step 300 t=2 it=10 KE=26.3955 Wext=0 res=-52.8573 maxslip=0.121335 dTmax=157.012  wall=1926.93 s (cpu 1842.59 s)
+step 350 t=2.5 it=10 KE=31.0063 Wext=0 res=-63.3884 maxslip=0.178046 dTmax=228.623  wall=2536.62 s (cpu 2424.27 s)
+step 400 t=3 it=12 KE=28.1417 Wext=0 res=-65.7255 maxslip=0.230841 dTmax=265.89  wall=3187.69 s (cpu 3049.16 s)
+step 450 t=3.5 it=11 KE=20.776 Wext=0 res=-65.7403 maxslip=0.292215 dTmax=299.687  wall=3868.54 s (cpu 3701.29 s)
+step 500 t=4 it=10 KE=15.0526 Wext=0 res=-65.749 maxslip=0.329299 dTmax=348.047  wall=4527.3 s (cpu 4330.27 s)
+step 550 t=4.5 it=9 KE=12.0124 Wext=0 res=-65.7434 maxslip=0.338237 dTmax=381.122  wall=5142.12 s (cpu 4916.26 s)
+step 600 t=5 it=9 KE=9.00209 Wext=0 res=-65.7364 maxslip=0.293171 dTmax=400.953  wall=5736.66 s (cpu 5481.84 s)
+step 650 t=5.5 it=10 KE=6.41665 Wext=0 res=-65.7286 maxslip=0.293115 dTmax=407.412  wall=6313.04 s (cpu 6031.73 s)
+step 700 t=6 it=10 KE=4.42125 Wext=0 res=-65.7275 maxslip=0.314007 dTmax=402.757  wall=6945.58 s (cpu 6636.73 s)
+step 750 t=6.5 it=9 KE=3.27996 Wext=0 res=-65.7242 maxslip=0.35415 dTmax=396.964  wall=7562.97 s (cpu 7225.79 s)
+step 800 t=7 it=10 KE=2.71805 Wext=0 res=-65.7196 maxslip=0.384363 dTmax=391.881  wall=8163.63 s (cpu 7798 s)
+step 850 t=7.5 it=9 KE=2.37298 Wext=0 res=-65.7188 maxslip=0.411211 dTmax=386.559  wall=8729.56 s (cpu 8333.43 s)
+step 900 t=8 it=9 KE=2.04053 Wext=0 res=-65.7194 maxslip=0.439911 dTmax=381.621  wall=9265.05 s (cpu 8841.54 s)
+step 950 t=8.5 it=8 KE=1.7811 Wext=0 res=-65.7196 maxslip=0.466857 dTmax=378.198  wall=9809.24 s (cpu 9359.65 s)
+step 1000 t=9 it=8 KE=1.59921 Wext=0 res=-65.7198 maxslip=0.497928 dTmax=374.479  wall=10337.9 s (cpu 9865.01 s)
+step 1050 t=9.5 it=12 KE=1.45485 Wext=0 res=-65.72 maxslip=0.529524 dTmax=370.2  wall=10916.5 s (cpu 10416.7 s)
+step 1100 t=10 it=9 KE=1.27548 Wext=0 res=-65.7201 maxslip=0.572908 dTmax=366.844  wall=11487.8 s (cpu 10961.9 s)
+step 1150 t=10.5 it=10 KE=1.09721 Wext=0 res=-65.72 maxslip=0.622215 dTmax=364.162  wall=12044.6 s (cpu 11493.2 s)
+step 1200 t=11 it=10 KE=0.955719 Wext=0 res=-65.72 maxslip=0.662039 dTmax=361.066  wall=12622 s (cpu 12043.2 s)
+step 1250 t=11.5 it=11 KE=0.851051 Wext=0 res=-65.72 maxslip=0.697034 dTmax=358.167  wall=13207 s (cpu 12596.3 s)
+step 1300 t=12 it=12 KE=0.751965 Wext=0 res=-65.72 maxslip=0.714911 dTmax=356.035  wall=13805.6 s (cpu 13167.2 s)
+step 1350 t=12.5 it=11 KE=0.63909 Wext=0 res=-65.72 maxslip=0.721655 dTmax=353.728  wall=14423.9 s (cpu 13755.7 s)
+step 1400 t=13 it=9 KE=0.536675 Wext=0 res=-65.72 maxslip=0.745481 dTmax=351.322  wall=14964 s (cpu 14269.8 s)
+step 1450 t=13.5 it=10 KE=0.45686 Wext=0 res=-65.72 maxslip=0.770623 dTmax=349.164  wall=15502.4 s (cpu 14780.3 s)
+step 1500 t=14 it=10 KE=0.388615 Wext=0 res=-65.72 maxslip=0.794559 dTmax=347.13  wall=16057 s (cpu 15307.6 s)
+step 1550 t=14.5 it=9 KE=0.317505 Wext=0 res=-65.7201 maxslip=0.816447 dTmax=345.004  wall=16625.4 s (cpu 15850.7 s)
+step 1600 t=15 it=10 KE=0.251218 Wext=0 res=-65.7201 maxslip=0.836616 dTmax=343.095  wall=17177.8 s (cpu 16377.8 s)
+step 1650 t=15.5 it=12 KE=0.198578 Wext=0 res=-65.7201 maxslip=0.854408 dTmax=341.314  wall=17752.6 s (cpu 16925.8 s)
+step 1700 t=16 it=10 KE=0.156374 Wext=0 res=-65.7201 maxslip=0.87087 dTmax=339.588  wall=18355.9 s (cpu 17502.8 s)
+step 1750 t=16.5 it=11 KE=0.115576 Wext=0 res=-65.7201 maxslip=0.884075 dTmax=337.759  wall=18970.2 s (cpu 18089.8 s)
+step 1800 t=17 it=10 KE=0.0786075 Wext=0 res=-65.7201 maxslip=0.89541 dTmax=335.898  wall=19658.1 s (cpu 18752.8 s)
+step 1850 t=17.5 it=11 KE=0.0509703 Wext=0 res=-65.7201 maxslip=0.905992 dTmax=333.942  wall=20270.5 s (cpu 19339.5 s)
+step 1900 t=18 it=11 KE=0.0321863 Wext=0 res=-65.7201 maxslip=0.917833 dTmax=332.011  wall=20827.3 s (cpu 19871.9 s)
+step 1950 t=18.5 it=10 KE=0.0170571 Wext=0 res=-65.7201 maxslip=0.928207 dTmax=330.063  wall=21450.6 s (cpu 20471.8 s)
+step 2000 t=19 it=10 KE=0.00600334 Wext=0 res=-65.7201 maxslip=0.933814 dTmax=328.133  wall=22039.9 s (cpu 21038.3 s)
+step 2050 t=19.5 it=12 KE=0.00162269 Wext=0 res=-65.7201 maxslip=0.939899 dTmax=326.253  wall=22633.9 s (cpu 21607 s)
+step 2100 t=20 it=11 KE=0.00390403 Wext=0 res=-65.7201 maxslip=0.941139 dTmax=324.406  wall=23175.2 s (cpu 22124.9 s)
+step 2150 t=20.5 it=11 KE=0.00819319 Wext=0 res=-65.7201 maxslip=0.941139 dTmax=322.514  wall=23742.1 s (cpu 22667 s)
+step 2200 t=21 it=11 KE=0.0129621 Wext=0 res=-65.7201 maxslip=0.941139 dTmax=320.651  wall=24341.3 s (cpu 23239.3 s)
+step 2250 t=21.5 it=13 KE=0.0175993 Wext=0 res=-65.7201 maxslip=0.941139 dTmax=318.828  wall=24882.9 s (cpu 23756.6 s)
+step 2300 t=22 it=10 KE=0.0194391 Wext=0 res=-65.7201 maxslip=0.941139 dTmax=317.047  wall=25448.6 s (cpu 24297.6 s)
+step 2350 t=22.5 it=10 KE=0.0167559 Wext=0 res=-65.7201 maxslip=0.941138 dTmax=315.308  wall=26029.3 s (cpu 24854.4 s)
+step 2400 t=23 it=10 KE=0.0117481 Wext=0 res=-65.7201 maxslip=0.938912 dTmax=313.612  wall=26617.6 s (cpu 25418.7 s)
+step 2450 t=23.5 it=11 KE=0.00691506 Wext=0 res=-65.7201 maxslip=0.936527 dTmax=311.954  wall=27202.2 s (cpu 25980 s)
+step 2500 t=24 it=11 KE=0.00402952 Wext=0 res=-65.7201 maxslip=0.936212 dTmax=310.334  wall=27783.7 s (cpu 26538.9 s)
+step 2550 t=24.5 it=11 KE=0.00221429 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=308.749  wall=28355.7 s (cpu 27089 s)
+step 2600 t=25 it=10 KE=0.00175271 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=307.199  wall=28916.3 s (cpu 27628 s)
+step 2650 t=25.5 it=10 KE=0.00365151 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=305.683  wall=29472.4 s (cpu 28161.2 s)
+step 2700 t=26 it=11 KE=0.00737845 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=304.2  wall=30210.3 s (cpu 28872.6 s)
+step 2750 t=26.5 it=11 KE=0.00915078 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=302.748  wall=31093 s (cpu 29727.5 s)
+step 2800 t=27 it=11 KE=0.00883617 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=301.327  wall=31971.1 s (cpu 30577.1 s)
+step 2850 t=27.5 it=11 KE=0.00743336 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=299.936  wall=32908.2 s (cpu 31483.6 s)
+step 2900 t=28 it=11 KE=0.00597309 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=298.574  wall=33962.8 s (cpu 32507.2 s)
+step 2950 t=28.5 it=11 KE=0.00346512 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=297.239  wall=35007.2 s (cpu 33520.6 s)
+step 3000 t=29 it=12 KE=0.000964155 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=295.931  wall=36022.3 s (cpu 34505.6 s)
+step 3050 t=29.5 it=10 KE=0.000755494 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=294.649  wall=37064.2 s (cpu 35516.5 s)
+step 3100 t=30 it=11 KE=0.00299995 Wext=0 res=-65.7202 maxslip=0.93621 dTmax=293.392  wall=38116.7 s (cpu 36538.1 s)
+accepted steps: largest local residual 9.97282e-15 (robust loop), 9.99999e-15 (polish); largest slip stress ratio |tau|/(f tau_c) 510.033, steps with a ratio above 300 (where the capped slip law differs from the exact one): 183
+phase-field linear solve (r8b): projected CG (CG + Jacobi on the eliminated system), CG iterations 0, CG solves redone directly 0, steps repeated with the previous solver 0
+fast assembly (r8, -fastasm 1): phase 9735, element means 39679, linear operators 9002 calls; 1172 compared with the forms (-fastcheck 50), largest relative difference 1.1622e-12
+fast assembly: largest matrix check deviation 1.99119e-16 (limit 1e-9; rank 0)
+branch guard (-betamax 45 deg): largest |beta| at accepted steps 0.202272 deg; rejected iterates 0, rejected steps 0
+final-state checks: rejected for the global residual, the constraint or admissibility 0
+local acceptance test (-localtol 1e-10): largest residual 9.99999e-15, rejections 0; slip law exact (no cap)
+spatial power split, loaded steps 101..3100 of this launch (every step of the run: <out>_power.csv): plastic work with centroid driving forces 65.4477, with their Gauss-point mean 65.4502; net difference 3.87792e-05 and element-by-element sum |P_q - P_c| 0.000215188 of sum |P_c| (largest per step 0.0110087, 0.0486487); largest |<tau>_q - tau_c| / max |tau_c| 1.12272
+second retries with the exact KWC Hessian (-retrytan -1): 0, converged 0
+local update (-localcold 0): largest local residual left by any call 1e-14 (increment units), local updates restarted from zero increments 0
+done. wall time 38122.7 s (cpu 36543.7 s);  unconverged steps 0, retries 0, line-search halvings 4753, steps converged on du only (residual floor) 0, ILU factorizations 33679, GMRES fallbacks 0 (max GMRES residual 1.14954e-09)
+safeguard counters: det F bound rejections 0, branch-guard rejections 0, stagnation abandons 0, line-search failures 0, phase-field failures 0, bound-pinned node-iterations 3, SSD-floor steps 0 (elements 0, stored-energy credit 0), W_plate 65.7046
+WARNING! There are options you set that were not used!
+WARNING! could be spelling mistake, etc!
+There are 60 unused database options. They are:
+Option left: name:-almc value: 4 source: command line
+Option left: name:-asm value: 1 source: command line
+Option left: name:-betamax value: 0.785398 source: command line
+Option left: name:-c2m value: 10 source: command line
+Option left: name:-ca value: 3.16227766 source: command line
+Option left: name:-cd value: 100 source: command line
+Option left: name:-ckevery value: 50 source: command line
+Option left: name:-ckroll value: 20 source: command line
+Option left: name:-diag value: 1 source: command line
+Option left: name:-dt value: 0.01 source: command line
+Option left: name:-el_sub_pc_type value: ilu source: code
+Option left: name:-etaphi value: 0.1 source: command line
+Option left: name:-etaphimin value: 1e-2 source: command line
+Option left: name:-etastar value: 1 source: command line
+Option left: name:-f0 value: 0.005944 source: command line
+Option left: name:-j value: 0 source: command line
+Option left: name:-jmin value: 0.1 source: command line
+Option left: name:-k0 value: 0 source: command line
+Option left: name:-kp value: 5.0 source: command line
+Option left: name:-kwca value: 0.10 source: command line
+Option left: name:-kwcd value: 5e-4 source: command line
+Option left: name:-kwcs value: 1.05 source: command line
+Option left: name:-kwctan value: 3 source: command line
+Option left: name:-lintol value: 1e-10 source: command line
+Option left: name:-localtol value: 1e-10 source: command line
+Option left: name:-lsmax value: 6 source: command line
+Option left: name:-maxit value: 40 source: command line
+Option left: name:-maxitretry value: 80 source: command line
+Option left: name:-muc value: 754 source: command line
+Option left: name:-nlocal value: 30 source: command line
+Option left: name:-npexpect value: 16 source: command line
+Option left: name:-nrelax value: 100 source: command line
+Option left: name:-nw (no value) source: command line
+Option left: name:-out value: out_a90_up400ms_v2_kt3pcg/a90_up400ms_v2_kt3pcg source: command line
+Option left: name:-phikkt value: 1e-8 source: command line
+Option left: name:-phimaxit value: 40 source: command line
+Option left: name:-phitol value: 1e-10 source: command line
+Option left: name:-pistonup value: 0 source: command line
+Option left: name:-pistonut value: 0.4 source: command line
+Option left: name:-polish value: 20 source: command line
+Option left: name:-precevery value: 0 source: command line
+Option left: name:-pth value: 2.0 source: command line
+Option left: name:-ptr value: 0.5 source: command line
+Option left: name:-qphi value: 100e3 source: command line
+Option left: name:-resfloor value: 1e-8 source: command line
+Option left: name:-restart value: out_a90_up400ms_v2_kt3pcg/a90_up400ms_v2_kt3pcg_ck.txt source: command line
+Option left: name:-rhofcut value: 1e4 source: command line
+Option left: name:-rhommin value: 1 source: command line
+Option left: name:-rhomsat value: 100 source: command line
+Option left: name:-slipexact value: 1 source: command line
+Option left: name:-softmin value: 0.01 source: command line
+Option left: name:-spinbranch value: 0.785398 source: command line
+Option left: name:-stagres value: 100 source: command line
+Option left: name:-tanevery value: 1 source: command line
+Option left: name:-tend value: 30 source: command line
+Option left: name:-tolres value: 1e-6 source: command line
+Option left: name:-tstop value: 1400 source: command line
+Option left: name:-v value: 0 source: command line
+Option left: name:-vc value: 2 source: command line
+Option left: name:-vtkevery value: 10 source: command line
