@@ -1,21 +1,26 @@
-__pycache__/
+# run and post-processing output
 logs/
 out_*/
 anim_*/
 deliver_*/
 grain_summary*/
-# AD variant (generated / built by ad/build_ad.sh)
+*data.zip
+__pycache__/
+# relaxation checkpoint (made by run_relax.sh; depends on the parameters in tag.sh)
+relax_checkpoint.txt
+relax_checkpoint.txt.*
+relax_checkpoint_v2*
+relax_checkpoint_old*
+relax_checkpoint_j*
+relax_checkpoint_exp*
+# generated production solver v2 (v2/make_v2.py, via plugin/build_plugin.sh); the former experimental files
+# built plugin (plugin/build_plugin.sh)
 kwc2d.so
-cosserat_kwc_ad.edp
-cosserat_kwc_ad_mpi.edp
-ad/build.log
-ad/.build.lock
-ad/check/
-# AD variant (generated / built by ad/build_ad.sh)
-kwc2d.so
-cosserat_kwc_ad.edp
-cosserat_kwc_ad_mpi.edp
-ad/build.log
-ad/.build.lock
-ad/check/
 mpi/kwc2d.so
+plugin/build.log
+plugin/.build.lock
+# generated self-test solver and its output (checks/run_tangent_check.sh)
+cosserat_kwc_check.edp
+cosserat_kwc_v2_check.edp
+checks/out_tancheck*/
+remesh/
