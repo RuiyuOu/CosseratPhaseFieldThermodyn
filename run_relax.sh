@@ -1,5 +1,5 @@
 #!/bin/bash
-# Relaxation stage: makes relax_checkpoint.txt if it is missing, does nothing if it exists with the same parameters, refuses otherwise.
+# Relaxation stage: makes the relaxation checkpoint of the set-up (relax_checkpoint_v2.txt, OLD=1: relax_checkpoint_j.txt) if it is missing, does nothing if it exists with the same parameters, refuses otherwise.
 # usage: bash run_relax.sh     env: MODE (mpi | serial), NP, RELAXCK, RELAXCHECK, physics variables of tag.sh (must match the runs)
 set -uo pipefail
 cd "$(dirname "$0")"

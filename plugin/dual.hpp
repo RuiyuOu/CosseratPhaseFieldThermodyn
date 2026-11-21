@@ -1,7 +1,7 @@
-// dual.hpp -- minimal forward-mode automatic differentiation for the element kernels of kwc3d.cpp.
+// dual.hpp -- minimal forward-mode automatic differentiation for the element kernels of kwc2d.cpp.
 // D<N, S>: value v and N directional derivatives d[0..N-1] of scalar type S (S = double, or D<M> for second derivatives).
 // Every operation applies its chain rule, so derivatives are those of the code as written, exact up to round-off.
-// Checked against autodiff and CoDiPack (agreement 1e-14) and finite differences (checks/ad_check).
+// Checked against autodiff and CoDiPack (agreement 1e-14) and against central differences (checks/make_checks.py, -adcheck 1).
 #pragma once
 #include <cmath>
 

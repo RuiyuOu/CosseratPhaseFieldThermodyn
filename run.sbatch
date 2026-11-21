@@ -4,6 +4,7 @@
 #SBATCH -N 1
 #SBATCH -n 16
 #SBATCH --mem=48G
+#SBATCH --hint=nomultithread   # one rank per physical core (the node may still ignore it: run.sh checks, HWGUARD)
 #SBATCH -t 24:00:00
 #SBATCH --array=0-5
 #SBATCH -o logs/impact_%A_%a.log

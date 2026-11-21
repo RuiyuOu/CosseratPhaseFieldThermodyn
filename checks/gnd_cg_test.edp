@@ -1,0 +1,47 @@
+// gnd_cg_test.edp -- analytic checks of the Cermelli-Gurtin GND measure with the solver's weak curl (P0 Fp, weak nodal curl
+// with boundary terms, lumped P1 mass, element mean), as in curlFpG of the v2 solver (7.5).
+//   FreeFem++ -nw gnd_cg_test.edp
+load "msh3"
+func real hh(real s) { return 0.3*sin(2*pi*s); }
+func real dh(real s) { return 0.6*pi*cos(2*pi*s); }
+real[int] errs(4);
+int[int] Ns = [20, 40, 80, 160];
+for (int r = 0; r < Ns.n; r++) {
+  int Nm = Ns[r];
+  mesh Th = square(Nm, Nm);
+  fespace Ph(Th, P0); fespace Vh1(Th, P1);
+  int nt = Th.nt;
+  varf vM(u, w) = int2d(Th)(w); real[int] lump = vM(0, Vh1);
+  Ph fpA, fpB;
+  varf vCurlFp(un, w) = int2d(Th)(-(fpA*dx(w) - fpB*dy(w))) + int1d(Th, 1, 2, 3, 4)((fpA*N.x - fpB*N.y)*w);
+  // test fields (element means)
+  Ph f11, f12, f21, f22;
+  int test = 0;
+  real[int] e(4);
+  for (test = 0; test < 4; test++) {
+    if (test == 0) { f11 = 1.2; f12 = 0.3; f21 = -0.1; f22 = 0.9; }                                   // homogeneous
+    if (test == 1) { f11 = 1 + 0.2*cos(x)*y; f12 = 0.2*sin(x); f21 = 0.1*y; f22 = 1 + 0.1*x; }      // compatible: grad of (x + 0.2 sin(x) y, 0.1 x y + y)
+    if (test == 2) { f11 = exp(hh(x)); f12 = 0; f21 = 0; f22 = exp(-hh(x)); }                      // discriminator: |c/Jp| = |h'| e^-h, |Fp c| = |h'| e^-2h
+    if (test == 3) { f11 = cos(0.4*y); f12 = -sin(0.4*y); f21 = sin(0.4*y); f22 = cos(0.4*y); }     // lattice rotation phi(y) = 0.4 y: |c| = 0.4
+    Vh1 c1, c2;
+    fpA[] = f12[]; fpB[] = f11[]; c1[] = vCurlFp(0, Vh1); c1[] = c1[] ./ lump;
+    fpA[] = f22[]; fpB[] = f21[]; c2[] = vCurlFp(0, Vh1); c2[] = c2[] ./ lump;
+    Ph c1e = c1, c2e = c2;
+    real[int] jp = f11[] .* f22[]; real[int] t = f12[] .* f21[]; jp -= t;
+    real[int] g1 = c1e[] ./ jp, g2 = c2e[] ./ jp;
+    // exact |c/Jp| (element centroid), interior elements only (one layer from the boundary excluded)
+    Ph ex;
+    if (test <= 1) ex = 0;
+    if (test == 2) ex = abs(dh(x))*exp(-hh(x));
+    if (test == 3) ex = 0.4;
+    Ph inside = (x > 2./Nm && x < 1 - 2./Nm && y > 2./Nm && y < 1 - 2./Nm);
+    real em = 0, eo = 0;
+    for (int k = 0; k < nt; k++) if (inside[][k] > 0.5) {
+      real gn = sqrt(g1[k]^2 + g2[k]^2); em = max(em, abs(gn - ex[][k]));
+      if (test == 2) { real o1 = f11[][k]*c1e[][k] + f12[][k]*c2e[][k], o2 = f21[][k]*c1e[][k] + f22[][k]*c2e[][k]; eo = max(eo, abs(sqrt(o1^2 + o2^2) - ex[][k])); }
+    }
+    e[test] = em;
+    if (test == 2) cout << "N=" << Nm << " test 2: max | |c/Jp| - |h'|e^-h | = " << em << ";  old |Fp c| vs the same: " << eo << endl;
+    else cout << "N=" << Nm << " test " << test << ": max error " << em << endl;
+  }
+}

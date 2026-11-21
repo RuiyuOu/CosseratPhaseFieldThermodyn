@@ -1,0 +1,280 @@
+// phase-field active-set solve of cosserat_kwc.edp, production mesh and constants; only the linear solve differs between modes
+load "IncompleteCholesky"
+load "kwcphi"
+int mode = atoi(ARGV[ARGV.n-1]);   // 0 current (UMFPACK LU on reduced matrix), 1 CG+IC(0), 2 CG+Jacobi, 3 Cholesky (skyline), 4 Lagrange multipliers (saddle, LU)
+real f0 = 0.005944, aK = 0.10, sK = 1.05, dlt = 5e-4, dt = 0.01, T0 = 300., Qphi = 100e3, Rgas = 8.314, phiArrMin = 1e-2;
+real chi = 1., mu = 48., b = 2.556e-4, phimax = 1. - 1e-7, phiTol = 1e-10, phiKktTol = 1e-8; int phiMaxIt = 40;
+mesh Th = readmesh("mesh.msh");
+real[int] thg(8); { ifstream f("grain_angles_rad.txt"); for (int i = 0; i < 8; i++) f >> thg(i); }
+fespace Vh1(Th, P1); fespace Ph(Th, P0);
+Ph thg0; for (int k = 0; k < Th.nt; k++) thg0[][k] = thg(Th[k].label - 1);
+Vh1 th0s, xi; real ls = 0.04;
+solve sm(th0s, xi) = int2d(Th)(th0s*xi + ls*ls*(dx(th0s)*dx(xi) + dy(th0s)*dy(xi))) - int2d(Th)(thg0*xi);
+Ph Nd = sqrt(dx(th0s)^2 + dy(th0s)^2 + dlt^2) - dlt, rr = 10.;
+Vh1 phi = 0.999, phin, phik, T = T0;
+real etaPhi;
+macro phArr() max(exp(Qphi/Rgas*(1./T - 1./T0)), phiArrMin) //
+varf vphD(uu, xi) = int2d(Th)((etaPhi*phArr/dt + f0 + f0*sK*Nd*2/(1-phi)^2)*xi);
+varf vphR(uu, xi) = int2d(Th)((etaPhi*phArr/dt*(phi - phin) + f0*phi + f0*sK*Nd*2*phi/(1-phi) - (f0 - 0.5*chi*mu*b*b*rr))*xi
+                              + f0*aK^2*(dx(phi)*dx(xi) + dy(phi)*dy(xi)));
+varf vphA(phi, xi) = int2d(Th)((etaPhi*phArr/dt + f0 + f0*sK*Nd*2/(1-phik)^2)*phi*xi + f0*aK^2*(dx(phi)*dx(xi) + dy(phi)*dy(xi)));
+varf vphB(phi, xi) = int2d(Th)(etaPhi*phArr/dt*phin*xi + (f0 - 0.5*chi*mu*b*b*rr)*xi - f0*sK*Nd*(2*phik/(1-phik) - 2*phik/(1-phik)^2)*xi);
+varf vphL(phi, xi) = int2d(Th, qft=qf1pTlump)(phi*xi);
+int n = Vh1.ndof;
+int doExport = 0; real tAsm = 0, tSol = 0; int nIt = 0, nKry = 0, nAct = 0;
+matrix Lic; real[int] dinv(n);
+func real[int] PIC(real[int] & bb) { real[int] x = bb; icholSolve(Lic, x); return x; }
+func real[int] PJ(real[int] & bb) { real[int] x = bb .* dinv; return x; }
+func int phaseStep() {
+  phin = phi; phik = phi; int conv = 0;
+  for (int kn = 0; kn < phiMaxIt; kn++) {
+    nIt++;
+    real t0 = clock();
+    real[int] rk = vphR(0, Vh1), dk = vphD(0, Vh1); real[int] pk = phi[]; real tolAct = 0.1*phiKktTol; real[int] au(n), al(n);
+    for (int i = 0; i < n; i++) { real stp = pk[i] - rk[i]/max(dk[i], 1e-300); au[i] = (stp >= phimax - tolAct) ? 1. : 0.; al[i] = (stp <= tolAct) ? 1. : 0.; }
+    real[int] pmask = au; pmask += al; real[int] xpin = au; xpin *= phimax; real[int] fr(n); fr = 1.; fr -= pmask;
+    nAct = lrint(pmask.sum);
+    matrix Aphl = vphA(Vh1, Vh1); real[int] bph = vphB(0, Vh1);
+    real[int] sol(n);
+    if (mode != 4) {
+      matrix Lm = vphL(Vh1, Vh1);
+      real[int] axp = Aphl*xpin; real[int] lxp = Lm*xpin;
+      matrix Fr = fr, Pm = pmask;
+      matrix Am = Fr*Aphl; Am = Am*Fr; matrix Lp = Pm*Lm; Am = Am + Lp;
+      bph -= axp; bph = bph .* fr; bph += lxp;
+      real t1 = clock(); tAsm += t1 - t0;
+      if (mode == 0) { set(Am, solver = sparsesolver); sol = Am^-1*bph; }
+      else if (mode == 1) { ichol(Am, Lic); sol = phi[]; set(Am, solver = CG, eps = 1e-13, nbiter = 5000, precon = PIC); sol = Am^-1*bph; }
+      else if (mode == 2) { dinv = Am.diag; real[int] on1(n); on1 = 1.; dinv = on1 ./ dinv; sol = phi[]; set(Am, solver = CG, eps = 1e-13, nbiter = 5000, precon = PJ); sol = Am^-1*bph; }
+      else if (mode == 3) { set(Am, solver = Cholesky); sol = Am^-1*bph; }
+      tSol += clock() - t1;
+    } else {   // Lagrange multipliers: [A B^T; B 0] [phi; mu] = [b; bound], one row of B per active node
+      int na = nAct;
+      if (na == 0) { real t1 = clock(); tAsm += t1 - t0; set(Aphl, solver = sparsesolver); sol = Aphl^-1*bph; tSol += clock() - t1; } else {
+      int[int] I(na), J(na); real[int] C(na); int k = 0;
+      for (int i = 0; i < n; i++) if (pmask[i] > 0.5) { I[k] = k; J[k] = i; C[k] = 1.; k++; }
+      matrix Bm = [I, J, C]; Bm.resize(na, n); matrix Bt = Bm'; real[int] g(na); k = 0; for (int i = 0; i < n; i++) if (pmask[i] > 0.5) g[k++] = xpin[i];
+      matrix S = [[Aphl, Bt], [Bm, 0]]; real[int] rhs = [bph, g];
+      real t1 = clock(); tAsm += t1 - t0;
+      set(S, solver = sparsesolver); real[int] x = S^-1*rhs; sol = x(0:n-1);
+      tSol += clock() - t1; }
+    }
+    phi[] = sol;
+    for (int i = 0; i < n; i++) if (pmask[i] > 0.5) phi[][i] = xpin[i];
+    for [i, pv : phi[]] pv = max(0., min(phimax, pv));
+    real[int] ddp = phi[]; ddp -= phik[]; real dmx = ddp.linfty;
+    phik = phi;
+    if (dmx < phiTol) {
+      real[int] rr1 = vphR(0, Vh1), dg1 = vphD(0, Vh1); real[int] vv = phi[]; real vmax = 0;
+      for [i, v : rr1] { real pv = vv[i]; real viol = (pv <= 1e-9) ? max(-v, 0.) : ((pv >= phimax - 1e-9) ? max(v, 0.) : abs(v)); vmax = max(vmax, viol/max(dg1[i], 1e-300)); }
+      conv = (vmax <= phiKktTol); break;
+    }
+  }
+  return conv;
+}
+
+matrix LmC = vphL(Vh1, Vh1); real[int] lumpd = LmC.diag;   // lumped mass: constant, built once
+real[int] one(n); one = 1.;
+func real[int] step01(real[int] & x) { real[int] a = abs(x); a += 1e-300; real[int] y = x ./ a; y += 1.; y *= 0.5; return y; }   // 1 where x > 0, 0 where x < 0 (vectorised)
+func int phaseStepFast() {
+  phin = phi; phik = phi; int conv = 0;
+  for (int kn = 0; kn < phiMaxIt; kn++) {
+    nIt++;
+    real t0 = clock();
+    // one matrix form and one vector form per iteration:
+    //   D = A 1 (stiffness rows sum to zero, so A 1 = row sums of the weighted mass = the lumped reaction diagonal of vphD; phi = phik here)
+    //   B = A phik - R (the Newton right-hand side of vphB, algebraically)
+    matrix Aphl = vphA(Vh1, Vh1); real[int] rk = vphR(0, Vh1);
+    real[int] dk = Aphl*one; real[int] bph = Aphl*phik[]; bph -= rk;
+    real tolAct = 0.1*phiKktTol;
+    real[int] stp = rk ./ dk; stp = phi[] - stp;
+    real[int] xu = stp; xu -= (phimax - tolAct); xu += 1e-300*0; real[int] au = step01(xu);     // stp >= phimax - tolAct
+    real[int] xl = stp; xl -= tolAct; xl *= -1; real[int] al = step01(xl);                     // stp <= tolAct
+    real[int] pmask = au; pmask += al; real[int] xpin = au; xpin *= phimax;
+    nAct = lrint(pmask.sum);
+    real[int] sol(n);
+    matrix Am;
+    if (nAct == 0) Am = Aphl;
+    else {
+      real[int] fr = one - pmask; matrix Fr = fr; real[int] lp = lumpd .* pmask; matrix Lp = lp;
+      real[int] axp = Aphl*xpin; real[int] lxp = lumpd .* xpin;
+      Am = Fr*Aphl; Am = Am*Fr; Am = Am + Lp;
+      bph -= axp; bph = bph .* fr; bph += lxp;
+    }
+    real t1 = clock(); tAsm += t1 - t0;
+    if (mode == 5) { set(Am, solver = sparsesolver); sol = Am^-1*bph; }
+    else { dinv = Am.diag; dinv = one ./ dinv; sol = phi[]; set(Am, solver = CG, eps = 1e-13, nbiter = 5000, precon = PJ); sol = Am^-1*bph; }
+    tSol += clock() - t1;
+    // pin active nodes, clip to [0, phimax] (vectorised)
+    real[int] fr2 = one - pmask; sol = sol .* fr2; sol += xpin;
+    real[int] lo = sol; lo = abs(lo); sol += lo; sol *= 0.5;                       // max(sol, 0)
+    real[int] hi = sol; hi -= phimax; real[int] ha = abs(hi); hi += ha; hi *= 0.5; sol -= hi;   // min(sol, phimax)
+    phi[] = sol;
+    real[int] ddp = phi[]; ddp -= phik[]; real dmx = ddp.linfty;
+    phik = phi;
+    if (dmx < phiTol) {
+      real[int] rr1 = vphR(0, Vh1), dg1 = vphD(0, Vh1); real[int] vv = phi[]; real vmax = 0;
+      for [i, v : rr1] { real pv = vv[i]; real viol = (pv <= 1e-9) ? max(-v, 0.) : ((pv >= phimax - 1e-9) ? max(v, 0.) : abs(v)); vmax = max(vmax, viol/max(dg1[i], 1e-300)); }
+      conv = (vmax <= phiKktTol); break;
+    }
+  }
+  return conv;
+}
+
+// ---- element assembly on a fixed pattern with the 7-point rule qf5pT (the default of int2d), no varf in the iteration ----
+int nt = Th.nt;
+real sq = sqrt(15.);
+real[int,int] Lq(7,3);   // barycentric coordinates of the 7 points
+real[int] wq(7);
+{ real a1 = (6-sq)/21, b1 = (9+2*sq)/21, a2 = (6+sq)/21, b2 = (9-2*sq)/21;
+  Lq(0,:) = [1./3, 1./3, 1./3]; wq[0] = 9./40;
+  Lq(1,:) = [a1, a1, b1]; Lq(2,:) = [a1, b1, a1]; Lq(3,:) = [b1, a1, a1]; for (int q = 1; q < 4; q++) wq[q] = (155-sq)/1200;
+  Lq(4,:) = [a2, a2, b2]; Lq(5,:) = [a2, b2, a2]; Lq(6,:) = [b2, a2, a2]; for (int q = 4; q < 7; q++) wq[q] = (155+sq)/1200; }
+int[int] v0(nt), v1(nt), v2(nt); real[int] ar(nt);
+for (int k = 0; k < nt; k++) { v0[k] = Vh1(k,0); v1[k] = Vh1(k,1); v2[k] = Vh1(k,2); ar[k] = Th[k].area; }
+// fixed triplet pattern of the 9 element entries, and scatter matrices element -> vertex i
+int[int] IA(9*nt), JA(9*nt);
+for (int k = 0; k < nt; k++) { int[int] vv = [v0[k], v1[k], v2[k]];
+  for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) { IA[(3*i+j)*nt + k] = vv[i]; JA[(3*i+j)*nt + k] = vv[j]; } }
+matrix S0, S1, S2;
+{ int[int] ek(nt); for (int k = 0; k < nt; k++) ek[k] = k; real[int] o(nt); o = 1.;
+  S0 = [v0, ek, o]; S0.resize(n, nt); S1 = [v1, ek, o]; S1.resize(n, nt); S2 = [v2, ek, o]; S2.resize(n, nt); }
+varf vK(p, q) = int2d(Th)(dx(p)*dx(q) + dy(p)*dy(q));
+matrix KK = vK(Vh1, Vh1);   // constant stiffness
+real kK = f0*aK^2;
+real[int] Nel = Nd[], rel(nt);
+// quadrature-point values: q-th point of every element, vectorised
+func real[int] atq(real[int] & u, int q) { real[int] a = u(v0); a *= Lq(q,0); real[int] b = u(v1); b *= Lq(q,1); a += b; b = u(v2); b *= Lq(q,2); a += b; return a; }
+real[int] cq(nt), fq(nt); real[int] onee(nt); onee = 1.;
+// coefficient c and residual integrand f at point q (same expressions as vphA / vphR)
+func int coefq(int q, int wantf) {
+  real[int] pq = atq(phi[], q), tq = atq(T[], q), pk = atq(phik[], q), pn = atq(phin[], q);
+  real[int] arr(nt); for [i, v : arr] { v = exp(Qphi/Rgas*(1./tq[i] - 1./T0)); v = max(v, phiArrMin); }
+  arr *= etaPhi/dt;
+  real[int] om = onee - pk; om = om .* om; real[int] gq = Nel ./ om; gq *= 2*f0*sK; cq = arr; cq += f0; cq += gq;
+  if (wantf) { real[int] om1 = onee - pq; real[int] gp = pq ./ om1; gp *= 2*f0*sK; gp = gp .* Nel;
+    fq = pq - pn; fq = fq .* arr; real[int] t = pq; t *= f0; fq += t; fq += gp; fq -= f0; t = rel; t *= 0.5*chi*mu*b*b; fq += t; }
+  return 0;
+}
+func int assembleQ(matrix & A, real[int] & R) {
+  real[int] CA(9*nt); CA = 0; real[int] r0(nt), r1(nt), r2(nt); r0 = 0; r1 = 0; r2 = 0;
+  for (int q = 0; q < 7; q++) {
+    coefq(q, 1);
+    real[int] wc = cq .* ar; wc *= wq[q]; real[int] wf = fq .* ar; wf *= wq[q];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) { real[int] t = wc; t *= Lq(q,i)*Lq(q,j); CA((3*i+j)*nt:(3*i+j+1)*nt-1) += t; }
+    real[int] t = wf; t *= Lq(q,0); r0 += t; t = wf; t *= Lq(q,1); r1 += t; t = wf; t *= Lq(q,2); r2 += t;
+  }
+  A = [IA, JA, CA]; A.resize(n, n); A = A + kK*KK;   // hmm: scalar*matrix
+  R = S0*r0; real[int] t = S1*r1; R += t; t = S2*r2; R += t; t = KK*phi[]; t *= kK; R += t;
+  return 0;
+}
+func int phaseStepQ() {
+  phin = phi; phik = phi; int conv = 0; rel = rr[];
+  for (int kn = 0; kn < phiMaxIt; kn++) {
+    nIt++;
+    real t0 = clock();
+    matrix Aphl; real[int] rk(n); assembleQ(Aphl, rk);
+    real[int] dk = Aphl*one; real[int] bph = Aphl*phik[]; bph -= rk;
+    real tolAct = 0.1*phiKktTol;
+    real[int] stp = rk ./ dk; stp = phi[] - stp;
+    real[int] xu = stp; xu -= (phimax - tolAct); real[int] au = step01(xu);
+    real[int] xl = stp; xl -= tolAct; xl *= -1; real[int] al = step01(xl);
+    real[int] pmask = au; pmask += al; real[int] xpin = au; xpin *= phimax;
+    nAct = lrint(pmask.sum);
+    real[int] sol(n); matrix Am;
+    if (nAct == 0) Am = Aphl;
+    else { real[int] fr = one - pmask; matrix Fr = fr; real[int] lp = lumpd .* pmask; matrix Lp = lp;
+      real[int] axp = Aphl*xpin; real[int] lxp = lumpd .* xpin;
+      Am = Fr*Aphl; Am = Am*Fr; Am = Am + Lp; bph -= axp; bph = bph .* fr; bph += lxp; }
+    real t1 = clock(); tAsm += t1 - t0;
+    if (mode == 7) { set(Am, solver = sparsesolver); sol = Am^-1*bph; }
+    else { dinv = Am.diag; dinv = one ./ dinv; sol = phi[]; set(Am, solver = CG, eps = 1e-13, nbiter = 5000, precon = PJ); sol = Am^-1*bph; }
+    tSol += clock() - t1;
+    real[int] fr2 = one - pmask; sol = sol .* fr2; sol += xpin;
+    real[int] lo = abs(sol); sol += lo; sol *= 0.5;
+    real[int] hi = sol; hi -= phimax; real[int] ha = abs(hi); hi += ha; hi *= 0.5; sol -= hi;
+    phi[] = sol;
+    real[int] ddp = phi[]; ddp -= phik[]; real dmx = ddp.linfty;
+    phik = phi;
+    if (dmx < phiTol) {
+      matrix Af; real[int] rr1(n); assembleQ(Af, rr1); real[int] dg1 = Af*one; real[int] vv = phi[]; real vmax = 0;
+      for [i, v : rr1] { real pv = vv[i]; real viol = (pv <= 1e-9) ? max(-v, 0.) : ((pv >= phimax - 1e-9) ? max(v, 0.) : abs(v)); vmax = max(vmax, viol/max(dg1[i], 1e-300)); }
+      conv = (vmax <= phiKktTol); break;
+    }
+  }
+  return conv;
+}
+
+// ---- plug-in assembly (kwcphi.so): vphA values written into a fixed pattern, vphR in the same element loop ----
+matrix Apat; real[int] pv, Fpar(9); real[int,int] Fld(n, 4), Eld(nt, 2);
+int[int] Ipat(1), Jpat(1);
+{ Apat = vphA(Vh1, Vh1); real[int] C0(1); [Ipat, Jpat, C0] = Apat; pv.resize(Ipat.n);
+  int[int,int] Cn(nt, 3); real[int,int] XY(nt, 6);
+  for (int k = 0; k < nt; k++) for (int a = 0; a < 3; a++) { Cn(k, a) = Vh1(k, a); XY(k, 2*a) = Th[k][a].x; XY(k, 2*a+1) = Th[k][a].y; }
+  real miss = kpSetup(Cn, XY, Ipat, Jpat); cout << "kpSetup: pattern " << Ipat.n << " entries, missed " << miss << endl; }
+func int assembleP(real[int] & R) {
+  Fld(:, 0) = phi[]; Fld(:, 1) = phik[]; Fld(:, 2) = phin[]; Fld(:, 3) = T[];
+  Eld(:, 0) = Nd[]; Eld(:, 1) = rr[];
+  Fpar = [etaPhi, dt, f0, sK, aK, T0, Qphi/Rgas, phiArrMin, 0.5*chi*mu*b*b];
+  kpAsm(Fld, Eld, Fpar, pv, R); Apat.coef = pv;
+  return 0;
+}
+func int phaseStepP() {
+  phin = phi; phik = phi; int conv = 0;
+  for (int kn = 0; kn < phiMaxIt; kn++) {
+    nIt++;
+    real t0 = clock();
+    real[int] rk(n); assembleP(rk);
+    real[int] dk = Apat*one; real[int] bph = Apat*phik[]; bph -= rk;
+    if (doExport && kn == 0) { int[int] I(1), J(1); real[int] C(1); [I, J, C] = Apat;
+      { ofstream o("kkt_A.txt"); o.precision(17); o << I.n << endl; for (int k = 0; k < I.n; k++) o << I[k] << " " << J[k] << " " << C[k] << "\n"; }
+      { ofstream o("kkt_vec.txt"); o.precision(17); for (int i = 0; i < n; i++) o << phi[][i] << " " << rk[i] << " " << dk[i] << " " << bph[i] << " " << lumpd[i] << "\n"; }
+      doExport = 0; cout << "exported" << endl; }
+    real tolAct = 0.1*phiKktTol;
+    real[int] stp = rk ./ dk; stp = phi[] - stp;
+    real[int] xu = stp; xu -= (phimax - tolAct); real[int] au = step01(xu);
+    real[int] xl = stp; xl -= tolAct; xl *= -1; real[int] al = step01(xl);
+    real[int] pmask = au; pmask += al; real[int] xpin = au; xpin *= phimax;
+    nAct = lrint(pmask.sum);
+    real[int] sol(n); matrix Am;
+    if (nAct == 0) Am = Apat;
+    else { real[int] fr = one - pmask; matrix Fr = fr; real[int] lp = lumpd .* pmask; matrix Lp = lp;
+      real[int] axp = Apat*xpin; real[int] lxp = lumpd .* xpin;
+      Am = Fr*Apat; Am = Am*Fr; Am = Am + Lp; bph -= axp; bph = bph .* fr; bph += lxp; }
+    real t1 = clock(); tAsm += t1 - t0;
+    if (mode == 9) { set(Am, solver = sparsesolver); sol = Am^-1*bph; }
+    else { dinv = Am.diag; dinv = one ./ dinv; sol = phi[]; set(Am, solver = CG, eps = 1e-13, nbiter = 5000, precon = PJ); sol = Am^-1*bph; }
+    tSol += clock() - t1;
+    real[int] fr2 = one - pmask; sol = sol .* fr2; sol += xpin;
+    real[int] lo = abs(sol); sol += lo; sol *= 0.5;
+    real[int] hi = sol; hi -= phimax; real[int] ha = abs(hi); hi += ha; hi *= 0.5; sol -= hi;
+    phi[] = sol;
+    real[int] ddp = phi[]; ddp -= phik[]; real dmx = ddp.linfty;
+    phik = phi;
+    if (dmx < phiTol) {
+      real[int] rr1(n); assembleP(rr1); real[int] dg1 = Apat*one; real[int] vv = phi[]; real vmax = 0;
+      for [i, v : rr1] { real pv2 = vv[i]; real viol = (pv2 <= 1e-9) ? max(-v, 0.) : ((pv2 >= phimax - 1e-9) ? max(v, 0.) : abs(v)); vmax = max(vmax, viol/max(dg1[i], 1e-300)); }
+      conv = (vmax <= phiKktTol); break;
+    }
+  }
+  return conv;
+}
+// one-off check of the plug-in against the forms at a nontrivial state
+{ etaPhi = 0.1; phin = 0.999; phi = 0.5 + 0.4*sin(7*x)*cos(5*y); phik = phi; T = T0 + 60*x;
+  real[int] Rp(n); assembleP(Rp); matrix Af = vphA(Vh1, Vh1); real[int] Rf = vphR(0, Vh1);
+  real[int] zz(n), xx(n); for (int i = 0; i < n; i++) { zz[i] = sin(1.3*i); xx[i] = cos(0.7*i); }
+  real[int] y1 = Af*xx, y2 = Apat*xx; y1 -= y2; real[int] y0 = Af*xx;
+  real[int] dR = Rf - Rp;
+  cout << "plug-in vs forms: |A x - A_p x|/|A x| " << y1.linfty/y0.linfty << "   |R - R_p|/|R| " << dR.linfty/Rf.linfty << endl;
+  phi = 0.999; phin = phi; phik = phi; T = T0; }
+// sequence: 5 relaxation steps (eta = 1e-3), then 5 steps with the loaded viscosity (eta = 0.1) and a raised SSD density (100 um^-2)
+real tw0 = clock();
+for (int s = 0; s < 10; s++) {
+  etaPhi = (s < 5) ? 1e-3 : 0.1; if (s == 5) rr = 100.; if (s == 5 && mode == 10) doExport = 1;
+  int it0 = nIt; real a0 = tAsm, s0 = tSol;
+  int c;
+  if (mode >= 9) c = phaseStepP(); else if (mode >= 7) c = phaseStepQ(); else if (mode >= 5) c = phaseStepFast(); else c = phaseStep();
+  cout << "mode " << mode << " step " << s << " conv " << c << " its " << (nIt - it0) << " active " << nAct << " asm " << (tAsm - a0) << " s solve " << (tSol - s0) << " s  min phi " << phi[].min << endl;
+}
+cout << "mode " << mode << " TOTAL its " << nIt << " assembly " << tAsm << " s, linear solve " << tSol << " s, phase total " << (clock() - tw0) << " s" << endl;
+{ ofstream o("phi_mode" + mode + ".txt"); o.precision(17); for (int i = 0; i < n; i++) o << phi[][i] << "\n"; }

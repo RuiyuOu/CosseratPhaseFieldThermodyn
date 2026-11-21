@@ -60,6 +60,8 @@ folder) and `module use $HOME/modulefiles && module load freefem/4.15`. It also 
 * FreeFEM 4.15 pitfalls handled by the script: the Boost archive needed by bemtool fails its checksum (`--disable-bemtool`, Boost not
   downloaded; boundary elements are not used); CMake 4 rejects old `cmake_minimum_required` lines of bundled packages
   (`CMAKE_POLICY_VERSION_MINIMUM=3.5`).
+* GPU build (not yet tested): `CUDA=1 CUDA_MODULE=cuda/12.9 bash cluster/install_freefem_petsc.sh ...` builds PETSc with CUDA
+  (`--with-cuda-arch=${CUDA_ARCH:-90}`, H100) as a separate module `freefem/4.15-cuda` with its own build folder; the CPU module is untouched.
 * Longleaf (rhel9): `MODULES="gcc/12.2.0 openmpi/5.0.6-gcc_12.2.0 autoconf/2.71"` (the script picks it on a Longleaf host), partition `general`:
   `sbatch -p general cluster/install_freefem_petsc.sbatch`, `sbatch -p general cluster/test_install.sbatch`.
 

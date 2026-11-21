@@ -14,6 +14,10 @@ relax_checkpoint_old*
 relax_checkpoint_j*
 relax_checkpoint_exp*
 # generated production solver v2 (v2/make_v2.py, via plugin/build_plugin.sh); the former experimental files
+cosserat_kwc_v2.edp
+cosserat_kwc_v2_mpi.edp
+cosserat_kwc_exp.edp
+cosserat_kwc_exp_mpi.edp
 # built plugin (plugin/build_plugin.sh)
 kwc2d.so
 mpi/kwc2d.so

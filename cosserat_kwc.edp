@@ -1,11 +1,13 @@
 // =====================================================================
 // cosserat_kwc.edp  --  dynamic finite-deformation plane-strain Cosserat crystal plasticity with the KWC orientation
 // phase field; 8-grain [1-10] Rice planar-triple-slip polycrystal, plate impact (left edge clamped, right edge the plate).
-// Model, parameters and numerics: cosserat_kwc_production.md.  Units: um, ns, GPa, K (1 Pa s = 1 GPa ns).
+// Model, parameters and numerics: README.md; code map: CODE_MAP.md.  Units: um, ns, GPa, K (1 Pa s = 1 GPa ns).
+// Needs the plugin kwc2d.so (plugin/build_plugin.sh; run.sh builds it).
 // MPI version: python3 mpi/make_mpi.py cosserat_kwc.edp cosserat_kwc_mpi.edp (never edit the generated file).
 // =====================================================================
 load "iovtk"
 load "IncompleteCholesky"   // iLU / iluSolve for the GMRES preconditioner
+load "kwc2d"                // element-map derivatives by forward-mode automatic differentiation (plugin/kwc2d.cpp)
 
 // ---------------- command-line arguments -----------------------------
 func string arg(string key, string def) {
@@ -78,6 +80,7 @@ func int isRoot() { return 1; }
 int nPhiFail = 0; real nPhiPin = 0;   // nPhiPin: pinned (bound-active) node count summed over the phase iterations
 func int syncPen(real[int] & a) { return 0; }   // MPI: made consistent on the subdomain overlap
 real qRawMaxLast = 0; int jBad = 0, nJBad = 0, nStag = 0, nLsFail = 0, nFloorEl = 0, nFloorSteps = 0; real jbLast = 1, EfloorCum = 0;
+int nStoreCapEl = 0, nStoreCapSteps = 0; real EstoreCapCum = 0;   // Clausius-Duhem storage cap: binding element-steps, steps, withheld stored energy
 int nQ = 3;   // Gauss points per triangle (edge midpoints)
 real K0eos = atof(arg("-k0", "0")); if (K0eos <= 0) K0eos = (Clxx + Clxy + Clxz)/3.;   // cubic bulk modulus (C11 + 2 C12)/3 = 137.1 GPa
 real Kpeos = atof(arg("-kp", "5.0"));                                                  // K' (Cu: ~4s-1 with Hugoniot slope s = 1.49)
@@ -185,6 +188,11 @@ real[int] A11a(nt), A12a(nt), A21a(nt), A22a(nt), A11b(nt), A12b(nt), A21b(nt), 
 A11a = s1x .* s1y; A11a *= -1; A12a = s1x .* s1x; A21a = s1y .* s1y; A21a *= -1; A22a = s1x .* s1y;
 A11b = s2x .* s2y; A11b *= -1; A12b = s2x .* s2x; A21b = s2y .* s2y; A21b *= -1; A22b = s2x .* s2y;
 A11c = s3x .* s3y; A11c *= -1; A12c = s3x .* s3x; A21c = s3y .* s3y; A21c *= -1; A22c = s3x .* s3y;
+{ real[int,int] KC(nt, 21);   // per-element constants of the AD element map
+  KC(:, 0) = C11; KC(:, 1) = C22; KC(:, 2) = C12; KC(:, 3) = C16; KC(:, 4) = C26; KC(:, 5) = C66; KC(:, 6) = B11; KC(:, 7) = B22; KC(:, 8) = B12;
+  KC(:, 9) = A11a; KC(:, 10) = A12a; KC(:, 11) = A21a; KC(:, 12) = A22a; KC(:, 13) = A11b; KC(:, 14) = A12b; KC(:, 15) = A21b; KC(:, 16) = A22b;
+  KC(:, 17) = A11c; KC(:, 18) = A12c; KC(:, 19) = A21c; KC(:, 20) = A22c;
+  real[int] kp = [muc, K0eos, Kpeos, Clxx]; k2dSetup(KC, kp); k2dThreads(atoi(arg("-threads", "1"))); }
 
 // ---------------- smooth initial orientation field -------------------
 {
@@ -212,11 +220,10 @@ matrix Mu = vMu(Wh, Wh), Mt = vMt(Wh, Wh);
 matrix Mall = Mu + Mt;
 matrix Aeff;
 // tangent: exact derivative of the Gauss-point force incl. the implicit slip/spin response (consistentTangent -> gaussTangent);
-//   derivatives of the closed-form element map by central differences (-fdk for the kinematics, -fdq for the increments)
-real fdK = atof(arg("-fdk", "1e-6")), fdQ = atof(arg("-fdq", "1e-8"));
+//   derivatives of the closed-form element map by forward-mode AD in the plugin kwc2d (elemJac)
 int nPolish = atoi(arg("-polish", "20"));   // exact coupled local Newton iterations after the robust local loop
 int curStep = 0, curIt = -1, nanHit = 0; real curT = 0;   // (stage tracking, see mark())
-real tTanEl = 0, tTanAsm = 0, tTanFD = 0, tTanKc = 0, tTanPre = 0;
+real tTanEl = 0, tTanAsm = 0, tTanJac = 0, tTanKc = 0, tTanPre = 0;
 // ---- linear algebra ----
 // constant part (inertia + Dirichlet penalty) assembled once, KWC tangent and Gauss-point Hessian added per rebuild.
 // Serial: GMRES + ILU(0), direct solve if -lintol is missed.  MPI: PETSc (linMode = 0, set by the generator).
@@ -343,6 +350,8 @@ varf vTh(T, xi) = int2d(Th)(rhoC/dt*T*xi + kth*(dx(T)*dx(xi) + dy(T)*dy(xi)));
 matrix ATh = vTh(Vh1, Vh1, solver = sparsesolver);
 Ph Dsrc;
 varf vTr(T, xi) = int2d(Th)(rhoC/dt*Tn*xi + Dsrc/dt*xi);
+varf vMT(T, xi) = int2d(Th)(T*xi);
+matrix MTh = vMT(Vh1, Vh1);   // r8: heat right-hand side (rhoC/dt) M Tn + Bp01 Dsrc/dt
 
 // ---------------- local constitutive update (array based) --------------
 real[int] ta(nt), tb(nt), tcc(nt), tauc(nt), etad(nt), tmp(nt), tmp2(nt), xa(nt), lx(nt);
@@ -617,33 +626,13 @@ func int solve4(int m) {
   }
   return 0;
 }
-// perturb input j of the element map: 0 F11, 1 F12 (= du1/dy), 2 F21 (= du2/dx), 3 F22, 4 theta, 5-7 dgamma_1..3, 8 dw*
-func int addIn(int j, real h) {
-  if (j == 0) e11 += h; if (j == 1) hy1 += h; if (j == 2) hx2 += h; if (j == 3) e22 += h; if (j == 4) thc += h;
-  if (j == 5) dpa += h; if (j == 6) dpb += h; if (j == 7) dpc += h; if (j == 8) dwst += h;
-  return 0;
-}
-// output i of the element map: 0-4 finite-strain stress (P11, P12, P21, P22, dpsi/dtheta), 5-8 tau_1..3, tau*
-func int outI(int i, real[int] & o) {
-  if (i == 0) o = PF11; if (i == 1) o = PF12; if (i == 2) o = PF21; if (i == 3) o = PF22; if (i == 4) o = psth;
-  if (i == 5) o = ta; if (i == 6) o = tb; if (i == 7) o = tcc; if (i == 8) o = tstar;
-  return 0;
-}
-// central differences of the element map w.r.t. inputs j0..j1 (fills DSF, DTQ); restores the base state
-func int fdMap(int j0, int j1) {
-  real[int] op(nt), om(nt), d(nt);
-  for (int j = j0; j <= j1; j++) {
-    real h = (j < 5) ? fdK : fdQ;
-    real[int,int] Sp(nt, 9), Sm(nt, 9);
-    addIn(j, h); taus(); for (int i = 0; i < 9; i++) { outI(i, op); Sp(:, i) = op; }
-    addIn(j, -2*h); taus(); for (int i = 0; i < 9; i++) { outI(i, om); Sm(:, i) = om; }
-    addIn(j, h);
-    for (int i = 0; i < 9; i++) {
-      op = Sp(:, i); om = Sm(:, i); d = op - om; d *= 0.5/h;
-      if (i < 5) DSF(:, i*9 + j) = d;
-      else DTQ(:, (i-5)*9 + j) = d;
-    }
-  }
+// exact derivatives of the element map w.r.t. all 9 inputs (F11 F12 F21 F22 theta dgamma_1..3 dw*) by forward-mode AD:
+// fills DSF (5 stress outputs x 9) and DTQ (tau_1..3, tau* x 9), then re-evaluates the base state (taus)
+real[int,int] ADin(nt, 13);
+func int elemJac() {
+  ADin(:, 0) = e11; ADin(:, 1) = hy1; ADin(:, 2) = hx2; ADin(:, 3) = e22; ADin(:, 4) = thc; ADin(:, 5) = dpa; ADin(:, 6) = dpb; ADin(:, 7) = dpc; ADin(:, 8) = dwst;
+  ADin(:, 9) = fp11; ADin(:, 10) = fp12; ADin(:, 11) = fp21; ADin(:, 12) = fp22;
+  k2dJac(ADin, DSF, DTQ);
   taus();
   return 0;
 }
@@ -675,7 +664,7 @@ func int polishLocal() {
     real prevRes = lastPolishRes; lastPolishRes = rn0.max;
     if (lastPolishRes < 1e-14) break;                                  // |r| in increment units (~1e-10 relative)
     if (ip > 0 && lastPolishRes > 0.5*prevRes) break;                  // no longer contracting: round-off floor
-    fdMap(5, 8); buildJqq();
+    elemJac(); buildJqq();
     tmp = -ra; BB(:, 0) = tmp; tmp = -rb; BB(:, 1) = tmp; tmp = -rc; BB(:, 2) = tmp; tmp = -rwl; BB(:, 3) = tmp;
     solve4(1);
     da = BB(:, 0); db = BB(:, 1); dc = BB(:, 2); dw = BB(:, 3);
@@ -831,7 +820,76 @@ real[int] ph2m(nt), gm(nt), mxk(nt), myk(nt), areas(nt);
 varf vph2(un, w) = int2d(Th)(phi^2*w);
 varf vgph(un, w) = int2d(Th)(gphi*w);
 // element means of phi^2 (GND weighting) and of the log coupling g(phi) (KWC couple stress)
-func int updatePhi2() { ph2m = vph2(0, Ph); ph2m = ph2m ./ areas; gm = vgph(0, Ph); gm = gm ./ areas; return 0; }
+// ---- r8 fast assembly (patch_fastasm_r8.py): plugin k2dPhAsm / k2dPhElem and constant operators, compared with the forms every -fastcheck calls ----
+int phCG = (arg("-phsolver", "cg") == "cg") ? 1 : 0; int nPhFall = 0;   // r8b: phase-field linear solve by projected CG (CG + Jacobi on the eliminated system)
+real[int] phDinv(Vh1.ndof);
+func real[int] PJph(real[int] & bb) { real[int] x = bb .* phDinv; return x; }
+int nPhCGfail = 0, nPhCGit = 0;
+// preconditioned CG (Jacobi) on the SPD eliminated system; stops on |b - A x|_inf <= 1e-13 |b|_inf; returns the iterations (0: the start
+// already satisfies it), -1 if not converged in 2000 iterations or p'Ap <= 0 (then the caller solves directly)
+func int phPCG(matrix & A, real[int] & x, real[int] & bb) {
+  real[int] r = A*x; r -= bb; r *= -1.; real nb = max(bb.linfty, 1e-300);
+  if (r.linfty <= 1e-13*nb) return 0;
+  real[int] z = r .* phDinv; real[int] p = z; real rz = r'*z;
+  for (int it = 1; it <= 2000; it++) {
+    real[int] q = A*p; real pq = p'*q; if (!(pq > 0)) return -1;
+    real al = rz/pq; real[int] t = p; t *= al; x += t; t = q; t *= al; r -= t;
+    if (r.linfty <= 1e-13*nb) return it;
+    z = r .* phDinv; real rz2 = r'*z; real be = rz2/rz; rz = rz2; p *= be; p += z;
+  }
+  return -1;
+}
+int fastAsm = atoi(arg("-fastasm", "1"));   // r8c: 1 = fast assembly of the staggered fields (plugin, constant operators); 0 = FreeFEM forms (7.1 path)
+int fastCheck = atoi(arg("-fastcheck", "50")); real fastTol = atof(arg("-fastchecktol", "1e-8"));
+int nFastPh = 0, nFastEl = 0, nFastLin = 0, nFastChk = 0; real fastDev = 0;
+matrix Aph; real[int] phV(1), phOne(Vh1.ndof), phP(9); phOne = 1.;
+real[int,int] phF(Vh1.ndof, 4), phE(nt, 2), phF3(Vh1.ndof, 3), phO(nt, 3);
+{ varf vpat(p, q) = int2d(Th)(p*q + dx(p)*dx(q) + dy(p)*dy(q)); Aph = vpat(Vh1, Vh1);
+  int[int] I0(1), J0(1); real[int] C0(1); [I0, J0, C0] = Aph; phV.resize(I0.n);
+  int[int,int] Cn(nt, 3); real[int,int] XY(nt, 6);
+  for (int k = 0; k < nt; k++) for (int a = 0; a < 3; a++) { Cn(k, a) = Vh1(k, a); XY(k, 2*a) = Th[k][a].x; XY(k, 2*a+1) = Th[k][a].y; }
+  real miss = k2dPhSetup(Cn, XY, I0, J0);
+  if (miss != 0) { cout << "fast assembly: the phase pattern misses " << miss << " element entries" << endl; exit(5); } }
+func int fastStop(string what, real dev) {
+  if (isRoot()) { ofstream fs(out + "_FASTCHECK.txt"); fs << "fast assembly of " << what << " differs from the FreeFEM forms by " << dev << " (relative; tolerance " << fastTol << ")" << endl; }
+  cout << "FASTCHECK: " << what << " differs from the forms by " << dev << endl; exit(6); return 0; }
+func bool fastDue(int cnt) { return fastCheck > 0 && (cnt == 1 || cnt % fastCheck == 0); }
+// regime triggers of the phase assembly: the first call in which the Arrhenius floor is reached anywhere, and the first call in which a node
+// sits on a bound of phi, are always checked (state-dependent branches of the formulas that a 1-in-N sample could miss)
+real TfloorArr = 1./(1./T0 - log(1./phiArrMin)*Rgas/Qphi); int seenFloor = 0, seenBound = 0;
+func bool phRegime() {
+  bool due = false;
+  if (!seenFloor && gmaxS(T[].max) >= TfloorArr) { seenFloor = 1; due = true; }
+  if (!seenBound) { real pm = gmaxS(phi[].max), pn0 = -gmaxS(-phi[].min); if (pm >= phimax - 1e-12 || pn0 <= 1e-12) { seenBound = 1; due = true; } }
+  return due;
+}
+// difference of two local vectors relative to the reference, or to the size sc of the terms that cancel in it (all ranks together)
+func real relDiff(real[int] & a, real[int] & bb) { real[int] d = a - bb; return gmaxS(d.linfty)/max(gmaxS(bb.linfty), 1e-300); }
+// row by row: |a_i - b_i| / sc_i, sc_i = size of the terms of row i (the global max norm would hide an error in a row with small entries
+// behind rows with g'' ~ 1e14 near phi = 1, or behind cancelling terms)
+func real relRow(real[int] & a, real[int] & bb, real[int] & sc) {   // rows below 1e-13 of the largest row scale are measured against that floor
+  real[int] d = a - bb; d = abs(d); real[int] t = sc; t += max(1e-13*gmaxS(sc.max), 1e-300); d = d ./ t; return gmaxS(d.max); }
+func matrix absMat(matrix & A, int nr, int nc) { int[int] I1(1), J1(1); real[int] C1(1); [I1, J1, C1] = A; C1 = abs(C1); matrix B = [I1, J1, C1]; B.resize(nr, nc); return B; }
+// element means of phi^2 and g(phi), and the phase dissipation density eta_phi(T)(phi - phin)^2/dt (plugin; forms vph2, vgph, vDph)
+func int phElem(real eta) {
+  if (!fastAsm) {   // r8c: forms
+    real etaPhi = eta; varf vDphS(un, w) = int2d(Th)(etaPhi*phArr*(phi - phin)^2/dt*w);
+    real[int] a2 = vph2(0, Ph), ag = vgph(0, Ph), ad = vDphS(0, Ph); a2 = a2 ./ areas; ag = ag ./ areas; ad = ad ./ areas;
+    phO(:, 0) = a2; phO(:, 1) = ag; phO(:, 2) = ad; return 0; }
+  phF3(:, 0) = phi[]; phF3(:, 1) = phin[]; phF3(:, 2) = T[];
+  phP = [eta, dt, f0, sK, aK, T0, Qphi/Rgas, phiArrMin, 0.5*chi*mu*b*b];
+  k2dPhElem(phF3, phP, phO); nFastEl++;
+  if (fastDue(nFastEl)) {
+    real etaPhi = eta; varf vDphC(un, w) = int2d(Th)(etaPhi*phArr*(phi - phin)^2/dt*w);
+    real[int] a2 = vph2(0, Ph), ag = vgph(0, Ph), ad = vDphC(0, Ph); a2 = a2 ./ areas; ag = ag ./ areas; ad = ad ./ areas;
+    real[int] b2 = phO(:, 0), bg = phO(:, 1), bd = phO(:, 2);
+    real[int] s2 = abs(a2), sg = abs(ag); real dv = max(relRow(b2, a2, s2), relRow(bg, ag, sg));
+    dv = max(dv, relDiff(bd, ad));   // dissipation: against its largest value ((phi - phin)^2 loses digits where phi barely changes)
+    nFastChk++; fastDev = max(fastDev, dv); if (!(dv <= fastTol)) fastStop("the phi element means / phase dissipation", dv);
+  }
+  return 0;
+}
+func int updatePhi2() { phElem(0.); ph2m = phO(:, 0); gm = phO(:, 1); return 0; }
 func int kwcStress() {
   real[int] gx = gsx; real[int] gy = gsy;
   real[int] nr = gx .* gx; tmp = gy .* gy; nr += tmp; nr += dlt*dlt; nr = sqrt(nr);
@@ -932,7 +990,7 @@ func int gaussTangent(int mm) {
   real[int] d(nt), t1(nt), t2(nt);
   for (int q = 0; q < 3; q++) {
     e11 = GD1[q]*U; hy1 = GD2[q]*U; hx2 = GD3[q]*U; e22 = GD4[q]*U; thc = GD5[q]*U;
-    fdMap(0, 8);
+    elemJac();
     for (int i = 0; i < 5; i++) for (int j = 0; j < 5; j++) {
       d = DSF(:, i*9 + j); HQ(:, q*25 + i*5 + j) = d;
       d = DSF(:, i*9 + 5); t2 = BQ(:, j); d = d .* t2;
@@ -975,7 +1033,7 @@ func int gaussTangent(int mm) {
 // consistent tangent: dq/dk of the implicit local response (central differences of the element map), then the Gauss-point Hessian
 func int consistentTangent() {
   taus(); flow(ta, fs1, ga, dga, eEa, 1); flow(tb, fs2, gb, dgb, eEb, 1); flow(tcc, fs3, gc, dgc, eEc, 1);
-  real tf0 = clock(); fdMap(0, 8); tTanFD += clock() - tf0;
+  real tf0 = clock(); elemJac(); tTanJac += clock() - tf0;
   buildJqq();
   int mm = 5;   // right-hand sides: the 5 kinematic inputs
   for (int a = 0; a < 4; a++) for (int j = 0; j < mm; j++) {   // right-hand side -dr/dk (-dr/dlambda)
@@ -1052,6 +1110,7 @@ func int refreshTangent() {
 }
 real Wext = 0, Qtot = 0, Dcum = 0, E0 = 0;
 real Dneg = 0; int nneg = 0;
+real accLocMax = 0, accPolMax = 0, accXMax = 0; int nCapSteps = 0;   // accepted-state diagnostics (printed at the end)
 
 func real elasticEnergy() {
   u1[] = U;
@@ -1059,6 +1118,15 @@ func real elasticEnergy() {
   gaussInt(0); e = gaussE;   // finite-strain elastic energy at the Gauss points (incl. 2 mu_c a^2)
   e += int2d(Th)( f0*(0.5*(1-phi)^2 + 0.5*aK^2*(dx(phi)^2+dy(phi)^2)
                            + sK*gphi*NKWC(gtx^2+gty^2)) );
+  return e;
+}
+// elastic + KWC energy of the COMMITTED state: after the commit Fp already contains the step's plastic increment, which the increment
+// arrays still hold until the next step starts; elasticEnergy() (the trial energy, used by the -check self-test) would apply it again
+func real committedElasticEnergy() {
+  real[int] sva = dpa, svb = dpb, svc = dpc, svw = dwst;
+  dpa = 0; dpb = 0; dpc = 0; dwst = 0;
+  real e = elasticEnergy();
+  dpa = sva; dpb = svb; dpc = svc; dwst = svw;
   return e;
 }
 func real storedEnergy() {
@@ -1143,13 +1211,30 @@ func int writeVTK(string tag) {
 real[int] GR1(nt), GR2(nt); GR1 = 0; GR2 = 0;
 Ph fpA, fpB;
 varf vCurlFp(un, w) = int2d(Th)(-(fpA*dx(w) - fpB*dy(w))) + int1d(Th, 1, 2, 3, 4)((fpA*N.x - fpB*N.y)*w);
+// r8: the same form as two constant P0 -> P1 operators, c = CurlA fpA + CurlB fpB
+varf vCurlA(un, w) = int2d(Th)(-un*dx(w)) + int1d(Th, 1, 2, 3, 4)(un*N.x*w);
+varf vCurlB(un, w) = int2d(Th)(un*dy(w)) - int1d(Th, 1, 2, 3, 4)(un*N.y*w);
+matrix CurlA = vCurlA(Ph, Vh1), CurlB = vCurlB(Ph, Vh1), CurlAbs;
+// CurlAbs: sum of the entrywise absolute values of the area and boundary parts taken apart (size of the cancelling terms, for the check;
+// at a corner node the two parts cancel inside one entry)
+{ varf vA2(un, w) = int2d(Th)(-un*dx(w)); varf vA1(un, w) = int1d(Th, 1, 2, 3, 4)(un*N.x*w);
+  varf vB2(un, w) = int2d(Th)(un*dy(w)); varf vB1(un, w) = int1d(Th, 1, 2, 3, 4)(un*N.y*w);
+  matrix P1m = vA2(Ph, Vh1), P2m = vA1(Ph, Vh1), P3m = vB2(Ph, Vh1), P4m = vB1(Ph, Vh1);
+  CurlAbs = absMat(P1m, Vh1.ndof, nt); matrix Q2 = absMat(P2m, Vh1.ndof, nt), Q3 = absMat(P3m, Vh1.ndof, nt), Q4 = absMat(P4m, Vh1.ndof, nt);
+  CurlAbs = CurlAbs + Q2; CurlAbs = CurlAbs + Q3; CurlAbs = CurlAbs + Q4; }
+func real[int] curlFast(real[int] & a, real[int] & bb) {
+  if (!fastAsm) { fpA[] = a; fpB[] = bb; real[int] cs = vCurlFp(0, Vh1); return cs; }   // r8c: form
+  real[int] c = CurlA*a; real[int] c2 = CurlB*bb; c += c2; nFastLin++;
+  if (fastDue(nFastLin)) { fpA[] = a; fpB[] = bb; real[int] cf = vCurlFp(0, Vh1); real[int] ab = abs(a), bab = abs(bb); ab += bab; real[int] ta = CurlAbs*ab; real dv = relRow(c, cf, ta); nFastChk++; fastDev = max(fastDev, dv); if (!(dv <= fastTol)) fastStop("the GND curl", dv); }
+  return c;
+}
 func int syncP1(real[int] & a) { return 0; }   // (MPI: values made consistent on the subdomain overlap)
 real[int] lumpS = lump; syncP1(lumpS);
 real[int] own1S(Vh1.ndof); own1S = 1;   // P1 dofs owned by this process (all, in the serial code)
 func int curlFpG(real[int] & g1, real[int] & g2) {
   Vh1 c1, c2;
-  fpA[] = fp12; fpB[] = fp11; c1[] = vCurlFp(0, Vh1); syncP1(c1[]); c1[] = c1[] ./ lumpS;
-  fpA[] = fp22; fpB[] = fp21; c2[] = vCurlFp(0, Vh1); syncP1(c2[]); c2[] = c2[] ./ lumpS;
+  c1[] = curlFast(fp12, fp11); syncP1(c1[]); c1[] = c1[] ./ lumpS;   // r8: = vCurlFp with fpA = fp12, fpB = fp11
+  c2[] = curlFast(fp22, fp21); syncP1(c2[]); c2[] = c2[] ./ lumpS;
   Ph c1e = c1, c2e = c2;
   g1 = fp11 .* c1e[]; tmp = fp12 .* c2e[]; g1 += tmp;   // G = Fp c
   g2 = fp21 .* c1e[]; tmp = fp22 .* c2e[]; g2 += tmp;
@@ -1365,13 +1450,19 @@ if (restart != "") {
   if (nn >= nrelax) { real[int] va = V .* bcm, aa = Acc .* bcm; fixBCkin(t);
     cout << "bckin: prescribed-dof kinematics reset on restart (max |v| " << va.linfty << ", max |a| " << aa.linfty << " before)" << endl; }
   strength(); localUpdate(); refreshTangent();
-  if (didReset) { E0 = kinU() + kinT() + elasticEnergy() + storedEnergy() + heat(); cout << "relaxfix: E0=" << E0 << endl; }
+  if (didReset) { E0 = kinU() + kinT() + committedElasticEnergy() + storedEnergy() + heat(); cout << "relaxfix: E0=" << E0 << endl; }
 }
 // ---- run metadata (JSON) for later re-derivation of quantities ----
-if (nstart == 0) {
+// <out>_starts.txt: one line per launch (start step, full command line), never rewritten. <out>_meta.json: written when the output
+// destination has none (a fresh start, or the first launch of a run that starts from the relaxation checkpoint), never replaced, so
+// it describes the first launch; later launches are in <out>_starts.txt.
+{ ofstream fs(out + "_starts.txt", append); fs << "start step " << nstart << " |"; for (int i = 0; i < ARGV.n; i++) fs << " " << ARGV[i]; fs << endl; }
+bool metaNew = (exec("test -s " + out + "_meta.json") != 0);
+if (metaNew) {
   ofstream f(out + "_meta.json");
   f.precision(10);
   f << "{\n";
+  f << "  \"first_start_step\": " << nstart << ", \"restart_from\": \"" << restart << "\",\n";
   f << " \"units\": {\"length\": \"um\", \"time\": \"ns\", \"stress\": \"GPa\", \"temperature\": \"K\", \"density\": \"1e3 kg/m3\", \"energy_per_thickness\": \"GPa um^2 = 1e-3 J/m\"},\n";
   f << " \"mesh\": \"" << mfile << "\", \"j_um2\": " << jz << ", \"load\": \"plate (left edge clamped, right edge moving, top and bottom free)\", \"plate_un_um_ns\": " << pistUp << ", \"plate_ut_um_ns\": " << pistUt << ", \"ramp_ns\": " << pistTr << ", \"hold_ns\": " << pistTh << ",\n";
   f << " \"tend_ns\": " << tend << ", \"dt_ns\": " << dt << ", \"nrelax\": " << nrelax << ",\n";
@@ -1387,7 +1478,7 @@ if (nstart == 0) {
   f << " \"safeguards\": {\"jmin\": " << jMin << ", \"stagres\": " << stagRes << ", \"phitol\": " << phiTol << ", \"phikkt\": " << phiKktTol << ", \"phimaxit\": " << phiMaxIt << "},\n";
   f << " \"robustness\": {\"spinbranch\": " << spinCap << ", \"maxit\": " << maxit << ", \"maxitretry\": " << maxitRetry << ", \"ckroll\": " << ckRoll << ", \"softmin\": " << softMin << ", \"gnd\": \"curl Fp\", \"recovery\": \"Ask 2019 sweeping, C_A = " << CA << " um\"},\n";
   f << " \"elastic_law\": {\"eos\": \"vinet\", \"K0_GPa\": " << K0eos << ", \"Kprime\": " << Kpeos << ", \"integration\": \"3 Gauss points (edge midpoints)\"},\n";
-  f << " \"tangent\": {\"mode\": \"exact Gauss-point Hessian\", \"fdk\": " << fdK << ", \"fdq\": " << fdQ << ", \"polish\": " << nPolish << "},\n";
+  f << " \"tangent\": {\"mode\": \"exact Gauss-point Hessian\", \"element_map\": \"forward-mode AD (kwc2d)\", \"polish\": " << nPolish << "},\n";
   f << " \"newton\": {\"mode\": \"full\", \"tol_du\": " << tolU << ", \"tolres\": " << tolR << ", \"resfloor\": " << rFloor << ", \"lsmax\": " << lsMax << ", \"maxit\": " << maxit << "},\n";
   f << " \"thermal\": {\"T0\": " << T0 << ", \"rhoC\": " << rhoC << ", \"k\": " << kth << "},\n";
   f << " \"kwc\": {\"f0\": " << f0 << ", \"a\": " << aK << ", \"s\": " << sK << ", \"delta\": " << dlt << ", \"eta_phi0\": " << etaPhi0 << ", \"Q_phi\": " << Qphi << ", \"etaphimin\": " << phiArrMin << ", \"eta_star0\": " << etaStar0 << ", \"C_D\": " << CD
@@ -1403,6 +1494,7 @@ if (nstart == 0) {
   f << "theta_dot in rad/ns, D_rate in GPa/ns, rho in um^-2.\"\n";
   f << "}\n";
 }
+matrix phLm;   // r8: lumped phase mass, built at the first phase step
 for (int n = nstart + 1; n <= ntot; n++) {
   bool relax = (n <= nrelax);
   if (!relax) t += dt;
@@ -1421,6 +1513,13 @@ for (int n = nstart + 1; n <= ntot; n++) {
   if (!relax) { U = U .* mask; tv = pistm; tv *= -pistonDisp(t); U += tv; tv = pistmT; tv *= pistonDispU(t, pistUt); U += tv; }   // shear plate: every prescribed dof set exactly (wall 0, plate -d_n, +d_t)
   u1[] = U;
   Upred = U;
+  if (!relax) {   // prescribed dofs: inertia with the exact plate acceleration. Newmark would imply aN = c0 (g - Un) - c1 V - A there, but the
+    // committed state carries the exact acceleration (fixBCkin), and the consistent mass couples it into the free equations and the
+    // reactions: replace aN by the exact value in the inertial load (U is fixed on these dofs, so the tangent is unchanged)
+    real[int] aN = U; aN -= Un; aN *= c0; tv = V; tv *= c1; aN -= tv; aN -= Acc; aN = aN .* cdof;
+    real[int] aX = pistm; aX *= -pistonAcc(t); tv = pistmT; tv *= pistonAccU(t, pistUt); aX += tv; aX -= aN;
+    rk = Mu*aX; rin -= rk; rk = Mt*aX; rin -= rk;
+  }
   mark("predictor (U + dt V, plate displacement)"); nanV(U, "predicted displacement");
   int it; real du = 1;
   tl = 0; ta0 = 0; ts = 0; tr = 0;
@@ -1448,9 +1547,15 @@ for (int n = nstart + 1; n <= ntot; n++) {
       break;
     }
   }
-  if (verbose) cout << "step " << n << " t " << t << " iters " << it << " |R| " << resLast << "/" << res0Last << " local " << tl << " s, tangent " << tr << " s [element " << tTanEl << " (FD " << tTanFD << ", Kc assembly " << tTanKc << "), global assembly " << tTanAsm << " (ILU " << tTanPre << ")], residual " << ta0 << " s, solve " << ts << " s" << endl;
-  tTanEl = 0; tTanAsm = 0; tTanFD = 0; tTanKc = 0; tTanPre = 0;
+  if (verbose) cout << "step " << n << " t " << t << " iters " << it << " |R| " << resLast << "/" << res0Last << " local " << tl << " s, tangent " << tr << " s [element " << tTanEl << " (AD " << tTanJac << ", Kc assembly " << tTanKc << "), global assembly " << tTanAsm << " (ILU " << tTanPre << ")], residual " << ta0 << " s, solve " << ts << " s" << endl;
+  tTanEl = 0; tTanAsm = 0; tTanJac = 0; tTanKc = 0; tTanPre = 0;
   mark("converged: final local update"); localUpdate();
+  {   // accepted-state diagnostics: local residuals, and the slip-law stress ratio x = |tau|/(f tau_c) (flow() caps it at 300)
+    accLocMax = max(accLocMax, gmaxS(locres)); accPolMax = max(accPolMax, gmaxS(lastPolishRes));
+    real[int] xq = abs(ta); xq = xq ./ tauc; xq *= 1./fs1; real xm = xq.max;
+    xq = abs(tb); xq = xq ./ tauc; xq *= 1./fs2; xm = max(xm, xq.max); xq = abs(tcc); xq = xq ./ tauc; xq *= 1./fs3; xm = max(xm, xq.max);
+    xm = gmaxS(xm); accXMax = max(accXMax, xm); if (xm > 300) nCapSteps++;
+  }
   mark("commit: Newmark update, external work, dissipation");
   // Newmark update
   Anew = U; Anew -= Un; Anew *= c0; tv = V; tv *= c1; Anew -= tv; Anew -= Acc;
@@ -1493,24 +1598,55 @@ for (int n = nstart + 1; n <= ntot; n++) {
     varf vphB(phi, xi) = int2d(Th)(etaPhi*phArr/dt*phin*xi + (f0 - 0.5*chi*mu*b*b*rr)*xi
                                     - f0*sK*Nd*(2*phik/(1-phik) - 2*phik/(1-phik)^2)*xi);
     varf vphL(phi, xi) = int2d(Th, qft=qf1pTlump)(phi*xi);
+    if (phLm.n != Vh1.ndof) phLm = vphL(Vh1, Vh1);   // r8: constant, built once
+    int phCGnow = phCG;
+    for (int phPass = 0; phPass < 2; phPass++) {   // r8b: a step that fails with CG is repeated once with the previous solver
+    if (phPass > 0) { phi = phin; phik = phi; phiConv = 0; phiNit = 0; phiKktV = 0; phCGnow = 0; nPhFall++;
+      cout << "step " << n << ": phase-field step not converged with CG, repeated with the direct/ASM solver" << endl; }
     for (int kn = 0; kn < phiMaxIt; kn++) {
       phiNit = kn + 1;
       {
         // bound-constrained Newton step by a primal-dual active set (= semismooth Newton on the Lagrange-multiplier system).  Multiplier of a bound = the nodal
         // residual r; a node is active when mult/d + (phi - bound) crosses the bound, i.e. when the diagonally scaled Newton step phi - r/d (not the full coupled step) would leave [0, phimax].
         // Active nodes are eliminated exactly (phi = bound, their columns moved to the right-hand side); the free nodes solve the reduced system.  No penalty parameter.
-        real[int] rk = vphR(0, Vh1), dk = vphD(0, Vh1); real[int] pk = phi[]; real tolAct = 0.1*phiKktTol; real[int] au(Vh1.ndof), al(Vh1.ndof);
+        // r8: A (= vphA at phik) and R (= vphR at phi; phi = phik here) by the plugin; D = A 1 (= vphD: the stiffness rows sum to zero),
+        // b = A phik - R (= vphB); compared with the forms every -fastcheck calls
+        real[int] rk(Vh1.ndof);
+        if (!fastAsm) { matrix Afm = vphA(Vh1, Vh1); Aph = Afm; rk = vphR(0, Vh1); }   // r8c: forms (D and b below by vphD, vphB)
+        else {
+        phF(:, 0) = phi[]; phF(:, 1) = phik[]; phF(:, 2) = phin[]; phF(:, 3) = T[]; phE(:, 0) = Nd[]; phE(:, 1) = rr[];
+        phP = [etaPhi, dt, f0, sK, aK, T0, Qphi/Rgas, phiArrMin, 0.5*chi*mu*b*b];
+        k2dPhAsm(phF, phE, phP, phV, rk); Aph.coef = phV; nFastPh++;
+        bool phReg = phRegime();
+        if (fastDue(nFastPh) || (fastCheck > 0 && phReg)) {
+          matrix Af = vphA(Vh1, Vh1); real[int] rf = vphR(0, Vh1), df = vphD(0, Vh1), bf = vphB(0, Vh1);
+          real[int] zz(Vh1.ndof); for (int i = 0; i < Vh1.ndof; i++) zz[i] = 1. + 0.5*sin(1.7*i + 0.3);
+          matrix Aab = absMat(Af, Vh1.ndof, Vh1.ndof);
+          real[int] y1 = Af*zz, y2 = Aph*zz, s1 = Aab*zz; real dv = relRow(y2, y1, s1);                                     // matrix, row by row
+          real[int] ap = abs(phik[]); real[int] sR = Aab*ap; real[int] t1 = abs(bf); sR += t1; dv = max(dv, relRow(rk, rf, sR));   // R = A phik - b
+          real[int] dd = Aph*phOne; real[int] s0 = Aab*phOne; dv = max(dv, relRow(dd, df, s0));                             // D = A 1
+          real[int] bb2 = Aph*phik[]; bb2 -= rk; real[int] sB = Aab*ap; t1 = abs(rf); sB += t1; dv = max(dv, relRow(bb2, bf, sB));   // b = A phik - R
+          nFastChk++; fastDev = max(fastDev, dv); if (!(dv <= fastTol)) fastStop("the phase-field matrix / residual", dv);
+        }
+        }
+        real[int] dk(Vh1.ndof); if (fastAsm) dk = Aph*phOne; else dk = vphD(0, Vh1);   // r8c
+        real[int] pk = phi[]; real tolAct = 0.1*phiKktTol; real[int] au(Vh1.ndof), al(Vh1.ndof);
         for (int i = 0; i < Vh1.ndof; i++) { real stp = pk[i] - rk[i]/max(dk[i], 1e-300); au[i] = (stp >= phimax - tolAct) ? 1. : 0.; al[i] = (stp <= tolAct) ? 1. : 0.; }   // tolAct: a node whose multiplier is ~0 (degenerate, phi = bound) must not flip on and off with round-off
         syncPen(au); syncPen(al);
         for (int i = 0; i < Vh1.ndof; i++) { au[i] = (au[i] > 0.5) ? 1. : 0.; al[i] = (al[i] > 0.5) ? 1. : 0.; nPhiPin += (au[i] + al[i])*own1S[i]; }
         real[int] pmask = au; pmask += al; real[int] xpin = au; xpin *= phimax; real[int] fr(Vh1.ndof); fr = 1.; fr -= pmask;
-        matrix Aphl = vphA(Vh1, Vh1); real[int] bph = vphB(0, Vh1); matrix Lm = vphL(Vh1, Vh1);
+        matrix Aphl = Aph; real[int] bph(Vh1.ndof); if (fastAsm) { bph = Aph*phik[]; bph -= rk; } else bph = vphB(0, Vh1); matrix Lm = phLm;   // r8, r8c
         real[int] axp = Aphl*xpin; real[int] lxp = Lm*xpin;
         matrix Fr = fr, Pm = pmask;
         matrix Am = Fr*Aphl; Am = Am*Fr; matrix Lp = Pm*Lm; Am = Am + Lp;       // free block + lumped identity rows on the active nodes
         bph -= axp; bph = bph .* fr; bph += lxp;                                // free rows: b - A_fa x_a;  active rows: lumped mass * bound
+        if (phCGnow) { phDinv = Am.diag; phDinv = phOne ./ phDinv; real[int] x0 = phi[];
+          int itcg = phPCG(Am, x0, bph);
+          if (itcg >= 0) { phi[] = x0; nPhCGit += itcg; } else { nPhCGfail++; set(Am, solver = sparsesolver); x0 = Am^-1*bph; phi[] = x0; } }
+        else {
         set(Am, solver = sparsesolver);
         phi[] = Am^-1*bph;
+        }
         for (int i = 0; i < Vh1.ndof; i++) if (pmask[i] > 0.5) phi[][i] = xpin[i];   // active nodes exactly on their bound (an iterative solve leaves ~1e-14)
       }
       for [i, pv : phi[]] pv = max(0., min(phimax, pv));
@@ -1528,6 +1664,8 @@ for (int n = nstart + 1; n <= ntot; n++) {
         break;
       }
     }
+    if (phiConv || !phCGnow) break;
+    }
     if (!phiConv) {   // phase-field Newton did not reach -phitol and the KKT test: stop instead of silently committing an unconverged phi
       nPhiFail++;
       { ofstream fs(out + "_NOCONV.txt"); fs << "phase-field solve did not converge (|dphi| tolerance " << phiTol << ", KKT violation (Newton step in phi) " << phiKktV << " vs " << phiKktTol << ", " << phiNit << " its) at step " << n << " (t=" << t
@@ -1535,22 +1673,51 @@ for (int n = nstart + 1; n <= ntot; n++) {
       cout << "PHASE-NOCONV: stopped at step " << n << endl;
       break;
     }
-    Ph dph = phi - phin, ph2 = phi, eph = etaPhi*phArr;
+    Ph dph = phi - phin, ph2 = phi;
     // recovery by boundary sweeping (Ask et al. 2019, Eqs. 80 and 133): C_D max(dphi, 0) tanh(C_A^2 |grad theta_t|^2) rho_S, active only behind a sweeping boundary (phi increasing)
     tmp = dph[]; for [i, v : tmp] v = max(v, 0.);
     { real[int] gq = gsx; real[int] gq2 = gsy; gq = gq .* gq; gq2 = gq2 .* gq2; gq += gq2; gq *= CA*CA;
       for [i, v : gq] v = tanh(v); tmp = tmp .* gq; }
     tmp *= CD; tmp = tmp .* rhoS; drho -= tmp;
-    tmp = dph[] .* dph[]; tmp = tmp .* eph[]; tmp *= 1./dt; Dloc += tmp;
+    {   // phase-field dissipation: element average of eta_phi(T) (phi - phin)^2 / dt, integrated with the quadrature of the phase
+        // viscous term (the residual paired with the increment); the square of the element-mean increment would drop the
+        // within-element variation of the P1 increment
+      phElem(etaPhi); real[int] dq = phO(:, 2); Dloc += dq;   // r8: = vDph / areas
+    }
     Zst = ph2[]; Zst *= 0.5*chi*mu*b*b;
   }
   {   // Clausius-Duhem cap on storage: Z dStore <= sum|tau dgamma|  (inactive in normal plastic flow: Z dStore ~ 0.08 phi tau_c dgamma)
     real[int] cap = Wpl; tmp = Zst; tmp += 1e-300; cap = cap ./ tmp;
     real[int] excess = dStore - cap; tmp = abs(excess); excess += tmp; excess *= 0.5;   // max(dStore - cap, 0)
     drho -= excess; dStore -= excess;
+    // count where the cap binds; one line per binding step in <out>_storecap.csv (step, t, elements, stored energy withheld Z*excess*area)
+
+    real[int] flc(nt); for [i, v : excess] flc[i] = (v > 0) ? 1. : 0.;
+
+    real nce = gsumEs(flc);
+
+    if (nce > 0) {
+
+      nStoreCapEl += lrint(nce); nStoreCapSteps++;
+
+      tmp = excess .* Zst; tmp = tmp .* areas; real ecap = gsumEs(tmp); EstoreCapCum += ecap;
+
+      if (isRoot()) {
+
+        bool scHdr = (exec("test -s " + out + "_storecap.csv") != 0);
+
+        ofstream fsc(out + "_storecap.csv", append);
+
+        if (scHdr) fsc << "step,t_ns,elements_capped,stored_energy_withheld" << endl;
+
+        fsc << n << "," << t << "," << lrint(nce) << "," << ecap << endl;
+
+      }
+
+    }
+
   }
   tmp = Zst .* drho; Dloc -= tmp;
-  nnegStep = 0; for [i, dv : Dloc] if (dv < -1e-14) { nneg++; nnegStep++; }
   dAlgCum += dAlgStep;
   pa += dpa; pb += dpb; pc += dpc; wst += dwst; rhoS += drho;
   fp11 = tf11; fp12 = tf12; fp21 = tf21; fp22 = tf22;
@@ -1561,6 +1728,8 @@ for (int n = nstart + 1; n <= ntot; n++) {
     real[int] flg(nt); for [i, v : exf] flg[i] = (v > 0) ? 1. : 0.;
     real nfe = gsumEs(flg); if (nfe > 0) { nFloorEl += lrint(nfe); nFloorSteps++; tmp = tmp .* areas; EfloorCum += gsumEs(tmp); }
   }
+  // elements with negative heat source, counted after every correction of Dloc (the SSD floor above included)
+  nnegStep = 0; for [i, dv : Dloc] if (dv < -1e-14) { nneg++; nnegStep++; }
   mark("commit: SSD storage/recovery, GND, mobile density"); nanE(drho, "SSD increment"); nanE(Dloc, "dissipation");
   // GND: |Fp Curl Fp - G_R|/b
   { real[int] g1(nt), g2(nt); curlFpG(g1, g2); g1 -= GR1; g2 -= GR2; tmp = g1 .* g1; tmp2 = g2 .* g2; tmp += tmp2; rhoG = sqrt(tmp); }
@@ -1570,7 +1739,10 @@ for (int n = nstart + 1; n <= ntot; n++) {
   Dcum += int2d(Th)(Dsrc);
   // heat
   Tn = T;
-  real[int] rT = vTr(0, Vh1);
+  real[int] rT(Vh1.ndof);
+  if (!fastAsm) rT = vTr(0, Vh1);   // r8c: form
+  else { rT = MTh*Tn[]; rT *= rhoC/dt; { real[int] rs = Bp01*Dsrc[]; rs *= 1./dt; rT += rs; }   // r8: = vTr
+  nFastLin++; } if (fastAsm && fastDue(nFastLin)) { real[int] rf = vTr(0, Vh1); real[int] sc = MTh*Tn[]; sc = abs(sc); sc *= rhoC/dt; { real[int] ad = abs(Dsrc[]); real[int] t2 = Bp01*ad; t2 *= 1./dt; sc += t2; } real dv = relRow(rT, rf, sc); nFastChk++; fastDev = max(fastDev, dv); if (!(dv <= fastTol)) fastStop("the heat right-hand side", dv); }
   mark("commit: heat equation solve");
   T[] = ATh^-1*rT;
   { real[int] tt = T[]; int nh = nanE(tt, "temperature"); }
@@ -1581,14 +1753,14 @@ for (int n = nstart + 1; n <= ntot; n++) {
     rhoM = rho0;
     thR = th; rhoG = 0;   // GND counts lattice curvature produced after relaxation only
     curlFpG(GR1, GR2);   // incompatibility present at the end of relaxation is the reference
-    E0 = kinU() + kinT() + elasticEnergy() + storedEnergy() + heat();
+    E0 = kinU() + kinT() + committedElasticEnergy() + storedEnergy() + heat();
     { Wplate = 0; reactionNow(); }
     cout << "relaxation done: E0=" << E0 << " min phi=" << phi[].min << endl;
     writeVTK("relaxed");
   }
   if (!relax || n == nrelax) {
     mark("output: energies, log, diag, VTK, checkpoint");
-    real KEu = kinU(), KEt = kinT(), Ee = elasticEnergy(), Es = storedEnergy(), Q = heat();
+    real KEu = kinU(), KEt = kinT(), Ee = committedElasticEnergy(), Es = storedEnergy(), Q = heat();
     real res = Wext - (KEu + KEt + Ee + Es + Q - E0);
     real[int] sl = abs(pa); tmp = abs(pb); sl += tmp; tmp = abs(pc); sl += tmp;
     Ph slp; slp[] = sl;
@@ -1635,5 +1807,10 @@ for (int n = nstart + 1; n <= ntot; n++) {
     cout << "TSTOP at step " << n << " t=" << t << " max T=" << T[].max << endl; break; }
   if (clock() - clk0 > walllimit) { saveCk(n); cout << "wall limit reached at step " << n << "; checkpoint written" << endl; break; }
 }
+cout << "accepted steps: largest local residual " << accLocMax << " (robust loop), " << accPolMax << " (polish); largest slip stress ratio |tau|/(f tau_c) " << accXMax
+     << ", steps with a ratio above 300 (where the capped slip law differs from the exact one): " << nCapSteps << endl;
+cout << "phase-field linear solve (r8b): " << (phCG ? "projected CG (CG + Jacobi on the eliminated system)" : "direct") << ", CG iterations " << nPhCGit << ", CG solves redone directly " << nPhCGfail << ", steps repeated with the previous solver " << nPhFall << endl;
+real fastDevG = gmaxS(fastDev);   // r8d: reduced by every rank (a collective inside cout runs on rank 0 only in MPI)
+cout << "fast assembly (r8, -fastasm " << fastAsm << "): phase " << nFastPh << ", element means " << nFastEl << ", linear operators " << nFastLin << " calls; " << nFastChk << " compared with the forms (-fastcheck " << fastCheck << "), largest relative difference " << fastDevG << endl;
 cout << "done. wall time " << (clock() - clk0) << " s;  unconverged steps " << nfail << ", retries " << nretry << ", line-search halvings " << lsTot << ", steps converged on du only (residual floor) " << nDuOnly << ", ILU factorizations " << nPre << ", GMRES fallbacks " << nLinFall << " (max GMRES residual " << linResMax << ")" << endl;
-cout << "safeguard counters: det F bound rejections " << nJBad << ", stagnation abandons " << nStag << ", line-search failures " << nLsFail << ", phase-field failures " << nPhiFail << ", bound-pinned node-iterations " << nPhiPin << ", SSD-floor steps " << nFloorSteps << " (elements " << nFloorEl << ", stored-energy credit " << EfloorCum << ")" << ", W_plate " << Wplate << endl;
+cout << "safeguard counters: det F bound rejections " << nJBad << ", stagnation abandons " << nStag << ", line-search failures " << nLsFail << ", phase-field failures " << nPhiFail << ", bound-pinned node-iterations " << nPhiPin << ", SSD-floor steps " << nFloorSteps << " (elements " << nFloorEl << ", stored-energy credit " << EfloorCum << ")" << ", storage-cap steps " << nStoreCapSteps << " (elements " << nStoreCapEl << ", stored energy withheld " << EstoreCapCum << ")" << ", W_plate " << Wplate << endl;

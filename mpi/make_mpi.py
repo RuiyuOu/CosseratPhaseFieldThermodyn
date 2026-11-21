@@ -26,6 +26,18 @@ def rep(old, new, count=1):
     n = s.count(old)
     if n != count:
         raise SystemExit("patch expected %d match(es), found %d:\n%s" % (count, n, old[:200]))
+    # a // comment in the last line of the replacement must not swallow code that follows the match on the same line
+    last = new.split('\n')[-1]
+    if '//' in last and '"' not in last.split('//')[-1]:
+        i = 0
+        while True:
+            i = s.find(old, i)
+            if i < 0: break
+            tail = s[i + len(old):].split('\n', 1)[0]
+            head = s[:i].rsplit('\n', 1)[-1] + old.split('\n')[-1]
+            if tail.strip() and not tail.lstrip().startswith('//') and '//' not in head:
+                raise SystemExit("make_mpi: the replacement ends in a // comment but code follows on the same line (%r):\n%s" % (tail[:80], old[:200]))
+            i += len(old)
     s = s.replace(old, new)
 
 # ---------------------------------------------------------------- header
@@ -105,7 +117,8 @@ rep('real linTol = atof(arg("-lintol", "1e-10"));\n',
     '// a solve that misses -lintol is redone with -petscfall (MUMPS direct).  -petscp1: phase-field and heat systems.\n'
     'string elOpt = arg("-petsc", "-ksp_type gmres -ksp_gmres_restart 200 -ksp_max_it 2000 -ksp_rtol " + linTol + " -pc_type asm -pc_asm_overlap 1 -sub_pc_type ilu");\n'
     'string fallOpt = arg("-petscfall", "-ksp_type preonly -pc_type lu -pc_factor_mat_solver_type mumps");\n'
-    'string p1Opt = arg("-petscp1", "-ksp_type gmres -ksp_rtol 1e-13 -ksp_max_it 2000 -pc_type asm -sub_pc_type lu");\n')
+    'string p1Opt = arg("-petscp1", "-ksp_type gmres -ksp_rtol 1e-13 -ksp_max_it 2000 -pc_type asm -sub_pc_type lu");\n'
+    + 'string phOpt = arg("-petscph", "-ksp_type cg -ksp_rtol 1e-13 -ksp_max_it 2000 -pc_type jacobi");   // r8b: phase field (SPD eliminated system)\n')
 rep('''  if (linMode == 1) {
     real tp0 = clock(); set(Aeff, solver = GMRES, eps = linTol, nbiter = linMaxIt, dimKrylov = krylovDim, precon = PreconILU);
     bool newPre = !havePre || (precEvery == 0 ? (curIt <= 0 || curIt == 1000) : ((curIt % precEvery) == 0));
@@ -193,7 +206,8 @@ bool thHdr = false; if (mpirank == 0) thHdr = (exec("test -s " + out + "_thermo.
 ofstream log(fLog, append);
 ofstream dlog(fDiag, append);
 ofstream tlog(fThm, append);''')
-rep('if (nstart == 0) {\n  ofstream f(out + "_meta.json");', 'if (nstart == 0 && mpirank == 0) {\n  ofstream f(out + "_meta.json");')
+rep('{ ofstream fs(out + "_starts.txt", append);', 'if (mpirank == 0) { ofstream fs(out + "_starts.txt", append);')
+rep('if (metaNew) {\n  ofstream f(out + "_meta.json");', 'if (metaNew && mpirank == 0) {\n  ofstream f(out + "_meta.json");')
 rep('  f << " \\"newton\\": {\\"mode\\": \\"full\\"',
     '  f << " \\"mpi\\": {\\"ranks\\": " << mpisize << ", \\"overlap\\": 1, \\"petsc\\": \\"" << elOpt << "\\"},\\n";\n  f << " \\"newton\\": {\\"mode\\": \\"full\\"')
 
@@ -289,7 +303,20 @@ rep('func int syncPen(real[int] & a) { return 0; }   // MPI: made consistent on 
 # ---------------------------------------------------------------- phase field: distributed solve
 # the active-set phase step is identical in the serial text (local matrices, flags made consistent by syncPen); only the linear solve is the PETSc one.
 # The active-set elimination acts on the local matrices: sum_i R_i^T D_i (Fr A_i Fr + Pm Lm_i) R_i = Fr A Fr + Pm Lm for consistent flags (sum_i R_i^T D_i R_i = I).
-rep("        set(Am, solver = sparsesolver);\n        phi[] = Am^-1*bph;\n", """        Ap1 = Am; set(Ap1, sparams = pfx(p1Opt, "ph_"), prefix = "ph_");
+if "phCGnow" in s:   # r8b: projected CG (-petscph, default CG + Jacobi); the repeat of a failed step uses -petscp1
+    rep("""        if (phCGnow) { phDinv = Am.diag; phDinv = phOne ./ phDinv; real[int] x0 = phi[];
+          int itcg = phPCG(Am, x0, bph);
+          if (itcg >= 0) { phi[] = x0; nPhCGit += itcg; } else { nPhCGfail++; set(Am, solver = sparsesolver); x0 = Am^-1*bph; phi[] = x0; } }
+        else {
+        set(Am, solver = sparsesolver);
+        phi[] = Am^-1*bph;
+        }
+""", """        Ap1 = Am;
+        if (phCGnow) set(Ap1, sparams = pfx(phOpt, "ph_"), prefix = "ph_"); else set(Ap1, sparams = pfx(p1Opt, "phf_"), prefix = "phf_");
+        phi[] = Ap1^-1*bph;
+""")
+else:
+    rep("        set(Am, solver = sparsesolver);\n        phi[] = Am^-1*bph;\n", """        Ap1 = Am; set(Ap1, sparams = pfx(p1Opt, "ph_"), prefix = "ph_");
         phi[] = Ap1^-1*bph;
 """)
 rep("      real[int] ddp = phi[]; ddp -= phik[]; real dmx = ddp.linfty;", "      real[int] ddp = phi[]; ddp -= phik[]; real dmx = gmax(ddp.linfty);")
@@ -405,6 +432,50 @@ rep('''func int linSolve() {
 rep('<< "  dt=" << dt << "  steps=" << ntot << "  nt=" << nt << "  ndof=" << Wh.ndof << endl;',
     '<< "  dt=" << dt << "  steps=" << ntot << "  nt=" << ntG << "  ndof=" << WhG.ndof << "  MPI ranks=" << mpisize << " (rank-0 subdomain nt=" << nt << ")" << endl;')
 
+# ---------------------------------------------------------------- v2 solver only (cosserat_kwc_v2.edp; absent in the base file)
+if '//LM-SOLVE-BEGIN' in s:   # -almc 4: saddle-point system (U, lambda) as a PETSc nested matrix, converted and factorised (MUMPS)
+    i0 = s.index('  //LM-SOLVE-BEGIN'); i1 = s.index('  //LM-SOLVE-END')
+    s = s[:i0] + """  // MPI: [[A, C], [B, E]] with the (u, theta) numbering of AeffM and the element numbering of Ap0; rows are taken from the owning rank.
+  // -almlin schur (default): FGMRES on the nested matrix, block-triangular Schur preconditioner: (u, theta) block = one application of ASM/ILU,
+  //   Schur complement E - B A^-1 C approximated by the diagonal of E - B diag(A)^-1 C (it is close to -1/(4 mu_c) I: spectrum of S Sp^-1 within
+  //   about [0.5, 1.8] on the test matrices).  A solve that misses the tolerance, and -almlin mumps, factorise the converted matrix with MUMPS.
+  Mat dCm(AeffM, Ap0, Cm); Mat dBm(Ap0, AeffM, Bm); Mat dEm(Ap0, Em);
+  Mat dS = [[AeffM, dCm], [dBm, dEm]];
+  bool lmDirect = (arg("-almlin", "schur") != "schur"); real[int] sol;
+  if (!lmDirect) {
+    real[int] rW, rE; ChangeNumbering(AeffM, rhs, rW); ChangeNumbering(Ap0, ca, rE);
+    real[int] list(rW.n + rE.n); list = 2.; if (rW.n > 0) list(0:rW.n - 1) = 1.;
+    string lmK = arg("-almpetsc", "-ksp_type fgmres -ksp_gmres_restart 200 -ksp_max_it 600 -ksp_rtol " + linTol + " -pc_type fieldsplit -pc_fieldsplit_type schur -pc_fieldsplit_schur_fact_type upper -pc_fieldsplit_schur_precondition selfp"
+      + " -fieldsplit_0_ksp_type preonly -fieldsplit_0_pc_type asm -fieldsplit_0_pc_asm_overlap 1 -fieldsplit_0_sub_pc_type ilu -fieldsplit_1_ksp_type preonly -fieldsplit_1_pc_type jacobi");
+    set(dS, sparams = pfx(lmK, "lm_"), prefix = "lm_", fields = list);
+    real[int] rP = [rW, rE]; KSPSolve(dS, rP, sol);
+    ChangeNumbering([AeffM, Ap0], [tv, dLam], sol, inverse = true, exchange = true);
+    real[int] c1 = Aeff*tv, c2 = Cm*dLam, c3 = Bm*tv, c4 = eCon .* dLam; c1 += c2; c1 -= rhs; c1 = c1 .* mask; c3 += c4; c3 -= ca;
+    real[int] c5 = ca .* ca, c6 = c3 .* c3;
+    real nb = sqrt(gdotW(rhs, rhs) + gsumEs(c5)), rr = sqrt(gdotW(c1, c1) + gsumEs(c6))/max(nb, 1e-300);
+    linResMax = max(linResMax, rr);
+    if (!(rr < 1e3*linTol)) { nLinFall++; lmDirect = true; if (mpirank == 0) cOUT << "   saddle-point Krylov solve reached only " << rr << " relative: MUMPS for this step" << endl; }
+  }
+  if (lmDirect) {
+    Mat dF; MatConvert(dS, dF);
+    set(dF, sparams = pfx(arg("-almfall", "-ksp_type preonly -pc_type lu -pc_factor_mat_solver_type mumps"), "lmd_"), prefix = "lmd_");
+    real[int] rP; ChangeNumbering([AeffM, Ap0], [rhs, ca], rP);
+    KSPSolve(dF, rP, sol);
+    ChangeNumbering([AeffM, Ap0], [tv, dLam], sol, inverse = true, exchange = true);
+  }
+""" + s[i1:]
+if "  real mf = sqrt(rhs'*rhs);" in s:   # v2 acceptFinal: global residual norm of the final state
+    rep("  real mf = sqrt(rhs'*rhs);", "  real mf = sqrt(gdotW(rhs, rhs));")
+if 'bool asmSerialDirect = true;' in s:   # v2: the PETSc matrix is built from Aeff every iteration; no direct solver is attached to Aeff
+    rep('bool asmSerialDirect = true;', 'bool asmSerialDirect = false;')
+if 'func real wallNow() { return clock(); }' in s:   # v2: wall seconds of <out>_newton.csv
+    rep('func real wallNow() { return clock(); }', 'func real wallNow() { return mpiWtime(); }')
+if '//MULT-SAVE' in s:        # checkpoint side file .mult: gathered, written by rank 0; read on every rank and restricted
+    rep('    { ofstream f(fn + ".mult"); f.precision(17); f << n << endl << (wInit ? 1 : 0) << endl << lamC << wdx << wdy; } }   //MULT-SAVE',
+        '    { real[int] q0 = gathE(lamC), q1 = gathE(wdx), q2 = gathE(wdy); if (mpirank == 0) { ofstream f(fn + ".mult"); f.precision(17); f << n << endl << (wInit ? 1 : 0) << endl << q0 << q1 << q2; } } }   //MULT-SAVE')
+    rep('      fmu >> lamC >> wdx >> wdy;   //MULT-READ',
+        '      { real[int] q0(ntG), q1(ntG), q2(ntG); fmu >> q0 >> q1 >> q2; lamC = q0(n2o); wdx = q1(n2o); wdy = q2(n2o); }   //MULT-READ')
+
 # ---------------------------------------------------------------- console: rank 0 only
 s = re.sub(r'(?<![A-Za-z_])cout <<', 'if (mpirank == 0) cout <<', s)
 s = s.replace('cOUT <<', 'cout <<')
@@ -413,7 +484,7 @@ rep('// cosserat_kwc.edp  --', '// cosserat_kwc_mpi.edp (PETSc/MPI, generated fr
 # sanity: no collective (reduction / gather / global energy) inside a rank-0-only console statement
 for m in re.finditer(r'if \(mpirank == 0\) cout <<', s):
     stmt = s[m.end():s.find(';', m.end())]
-    if re.search(r'\b(gmin|gmax|gsum|gsumE|gdotW|gathE|gathW|gath1|kinU|kinT|elasticEnergy|storedEnergy|heat)\s*\(', stmt):
+    if re.search(r'\b(gmin|gmax|gsum|gsumE|gdotW|gathE|gathW|gath1|kinU|kinT|elasticEnergy|committedElasticEnergy|storedEnergy|heat)\s*\(', stmt):
         raise SystemExit("collective inside a rank-0-only cout: " + stmt[:120])
 # sanity: nothing left that would solve or reduce locally
 for bad in ['sparsesolver', "rhs'*rhs", 'ATh^-1', 'solve sm(']:

@@ -55,7 +55,7 @@ How to run the code is in `README.md`; where each formula sits in the solver is 
   - The first term is storage, the second dynamic recovery, the third recovery by a sweeping boundary.
   - Storage is capped so that Z Δρ_stored ≤ Σ_a \|τ_a Δγ_a\| (Clausius–Duhem), and ρ_S ≥ 10⁻³.
 - **Mobile density:** ρ_M* = max(ρ_Msat (1 − √((ρ_S + ρ_G)/ρ_Fcut)), ρ_Mmin). Then ρ_M,n+1 = max((ρ_M,n + C₂ Γ ρ_M*)/(1 + C₂ Γ), ρ_Mmin).
-- **GND (Cermelli–Gurtin):** G = F_p (Curl F_p).
+- **GND (Cermelli–Gurtin):** G = J_p⁻¹ F_p (Curl F_p)ᵀ = e₃ ⊗ (c/J_p) in plane strain; ρ_G = |c/J_p|/b, no reference subtraction.
   - The curl is c_i = ∂₁F_p,i2 − ∂₂F_p,i1, computed as a weak nodal curl (lumped P1 mass), then averaged over the element.
   - ρ_G = \|G − G_R\|/b, where G_R is G at the end of the relaxation.
 - **Dissipation per element and step** (energy density, GPa):
@@ -77,9 +77,13 @@ How to run the code is in `README.md`; where each formula sits in the solver is 
 | `<tag>_log.csv` | every step from n = NRELAX | energies, energy audit, extremes |
 | `<tag>_thermo.csv` | every step from n = NRELAX | dissipation budget of the step |
 | `<tag>_diag.csv` | every step, 3 rows | the worst elements of the step |
-| `<tag>_meta.json` | at the start | every parameter, units, lattice, grain angles |
+| `<tag>_meta.json` | at the first launch into the output destination (fresh start or start from the relaxation checkpoint); never replaced | every parameter, units, lattice, grain angles; `first_start_step`, `restart_from` |
+| `<tag>_starts.txt` | by the solver, one line per launch | start step and the full command line of that launch |
+| `<tag>_power.csv` | v2, every step that succeeded as a whole (mechanics, phase field, densities, heat, commit without NaN; a step that fails after its mechanical solve is not written); on a resume `run.sh` drops the rows after the checkpoint, so the file holds the active history, each step once | `step`, `t_ns`, `P_c` = Σ A τ_c·δq, `P_q` = Σ A ⟨τ⟩_q·δq, `sum_abs_P_c` = Σ A \|P_c\|, `sum_abs_dP` = Σ A \|P_q − P_c\| (element by element), `max_rel_dtau` = max \|⟨τ⟩_q − τ_c\| / max \|τ_c\| (energy per step, GPa·µm² per µm thickness; δq = the three slips and Δw*) |
 | `<tag>.args` | by `run.sh` | the option list the run was started with (resume guard) |
-| `<tag>_ck.txt` (+ `.manifest`, `.gnd`, `.plate`, `.rhoM`), `<tag>_ckroll{0,1}.txt`, `<tag>_relaxed_ck.txt` | checkpoints | restart state (not for analysis) |
+| `<tag>.xargs` | by `run.sh`, one line per start | UTC time and the solver options outside the settings key (`-asm`, `-slipexact`, `-localtol`, `-betamax`, `-verbose`, `-asmcheck`); a start with options different from the previous one prints a note. `relax_checkpoint*.txt.xargs`: the same for the relaxation. The v2 entry of `<tag>_meta.json` also records `kwctan`, `almc`, `asm`, `slipexact`, `localtol`, `betamax_rad` |
+| `<tag>_newton.csv` | v2 runs (both set-ups), every step | header written whenever the file is new (also for runs that start from the relaxation checkpoint; before 15 November it was missing there); on a resume `run.sh` drops the rows after the checkpoint. Rows are written when the Newton iteration ends, so the last rows can belong to a step that failed later. Newton iterations, wall seconds, max \|ā\| (0 with the penalty) and max \|β\| in degrees (the lattice-rotation mismatch at the element means, `-betamax`; 0 when the guard is off) per step (rows with `it` = −1); with `-nlogit 1` also one row per iteration: step, it, merit, clock, max \|ā\|, max \|β\| |
+| `<tag>_ck.txt` (+ `.manifest`, `.gnd`, `.plate`, `.rhoM`; v2 also `.mult`: Cosserat multiplier λ and KWC dual flux w per element), `<tag>_ckroll{0,1}.txt`, `<tag>_relaxed_ck.txt` | checkpoints | restart state (not for analysis) |
 | `<tag>_TSTOP.txt`, `_NOCONV.txt`, `_NAN.txt`, `STALLED` | on a stop | one line: why and where the run stopped |
 | `<tag>_stage.txt` | always (overwritten) | the solver stage in progress (left behind by a hard crash) |
 
@@ -93,7 +97,7 @@ How to run the code is in `README.md`; where each formula sits in the solver is 
 | `v` (3 comp., z = 0) | µm/ns | velocity u̇ (Newmark) |
 | `dtheta_deg` | deg | microrotation θ relative to the initial grain orientation, including the rotation during relaxation |
 | `theta_lattice_deg` | deg | lattice orientation θ_t = θ₀ + θ |
-| `theta_dot` | rad/ns | microrotation rate θ̇ |
+| `theta_dot` | rad/ns | microrotation rate θ̇ from the Newmark recurrence; with j = 0 (v2) θ has no inertia and this is that recurrence's rate, not the solution of an equation of its own |
 | `T` | K | temperature |
 | `phi` | – | KWC order parameter φ |
 
@@ -108,7 +112,7 @@ All stresses are at the element-mean state F̄ of the committed step, with zero 
 | `slip_path_eff` | – | Σ_steps Σ_a \|Δγ_a\| (total slip path, unweighted) |
 | `slip_path_phys` | – | Σ_steps Γ = Σ_steps Σ_a f_a \|Δγ_a\| (slip path with the planar-triple-slip weights) |
 | `rhoS` | µm⁻² | ρ_S |
-| `rhoG` | µm⁻² | ρ_G = \|G − G_R\|/b (Cermelli–Gurtin, G = F_p Curl F_p); 0 at the end of the relaxation |
+| `rhoG` | µm⁻² | ρ_G = \|c/J_p\|/b (Cermelli–Gurtin, planar), counted from the relaxed state on |
 | `kp_x`, `kp_y` | – | always 0 (kept for the checkpoint and VTU layout) |
 | `wstar` | rad | accumulated grain-boundary spin w* = Σ_steps Δw* |
 | `tau_c` | GPa | τ_c used in the last step: from ρ_S, ρ_G and T of the previous step, i.e. one step behind `rhoS`, `rhoG` and `T` in the same file |
@@ -120,7 +124,7 @@ All stresses are at the element-mean state F̄ of the committed step, with zero 
 | `Fp_11`, `Fp_12`, `Fp_21`, `Fp_22` | – | F_p (global reference-lattice frame) |
 | `w_cosserat` | rad | a = (Ū₂₁ − Ū₁₂)/2 |
 | `J` | – | det F̄ |
-| `psi_elastic` | GPa | ψ = W_V(J) + ½ Ẽ:C:Ẽ + 2μ_c a² at F̄ (KWC and stored energies not included) |
+| `psi_elastic` | GPa | ψ = W_V(J) + ½ Ẽ:C:Ẽ + 2μ_c a² at F̄ (KWC and stored energies not included; in v2 without the multiplier term λa, which files written before 15 November 2026 include) |
 | `rho_mob` | µm⁻² | ρ_m = max(min(ρ_M, ρ_S + ρ_G), 10⁻³) used in the last step (previous-step state, like `tau_c`); the evolved ρ_M itself is only in the checkpoint `.rhoM` file |
 | `eta_drag` | GPa·ns | low-stress drag η_d = B₀ (T/T₀)/(b² ρ_m) used in the last step (previous-step state; before the relativistic factor) |
 
@@ -137,7 +141,7 @@ One row per step from n = NRELAX. After a restart, `run.sh` trims rows past the 
 | `locres` | – | largest local residual \|Δγ_a − Δt γ̇_a\| or spin residual over all elements, last local iteration |
 | `KE_trans` | GPa·µm² | ∫ ½ ρ \|u̇\|² dA |
 | `KE_rot` | GPa·µm² | ∫ ½ ρ j θ̇² dA |
-| `E_elastic` | GPa·µm² | Gauss-point elastic energy Σ_e A_e Σ_q w_q ψ(F_q) plus the KWC energy ∫ f₀ [½(1 − φ)² + ½ a² \|∇φ\|² + s g(φ) N(∇θ_t)] dA |
+| `E_elastic` | GPa·µm² | in the committed state (since 15 November 2026; before, the step's plastic increment was applied a second time on top of the committed F_p): Gauss-point elastic energy Σ_e A_e Σ_q w_q ψ(F_q) plus the KWC energy ∫ f₀ [½(1 − φ)² + ½ a² \|∇φ\|² + s g(φ) N(∇θ_t)] dA |
 | `E_stored` | GPa·µm² | ∫ ½ χ μ b² φ ρ_S dA |
 | `Q_heat` | GPa·µm² | ∫ ρC (T − T₀) dA |
 | `W_ext` | GPa·µm² | always 0 (no traction loading); the plate work is `W_plate` |
@@ -150,7 +154,7 @@ One row per step from n = NRELAX. After a restart, `run.sh` trims rows past the 
 | `mean_rhoS_um2` | µm⁻² | (1/100 µm²) ∫ ρ_S dA |
 | `max_rhoG_um2` | µm⁻² | max ρ_G |
 | `min_phi` | – | min φ |
-| `neg_D_count` | – | element-steps with D < −10⁻¹⁴ since the end of the relaxation (cumulative; should stay 0) |
+| `neg_D_count` | – | element-steps with D < −10⁻¹⁴ since the end of the relaxation, D after every correction including the SSD floor (since 15 November 2026; before, counted before the floor correction) (cumulative; should stay 0) |
 | `W_plate` | GPa·µm² | work done on the body through the prescribed dofs: Σ_steps ½(f_c,n + f_c,n+1)·(U_c,n+1 − U_c,n), f_c = −R (reaction of the discrete equations, inertia included). Only the plate moves, so this is the plate work. |
 | `audit_full` | GPa·µm² | energy balance: audit_residual − R₀ + W_plate = W_plate − (E − E₀) − R₀. Dissipation becomes heat, which is part of E, so an exactly conserving scheme would keep it at 0. The backward-Euler slip and phase-field updates dissipate slightly more than the D they report, so it drifts slowly; watch its size relative to W_plate. R₀ = 0, except after a restart without a `.plate` file, where the ledger restarts from the first step (that row shows `nan`). |
 
@@ -165,7 +169,7 @@ The dissipation budget of each step. Sums run over the elements e, weighted by a
 | `D_implicit_slip` | GPa·µm² | Σ_e Σ_a τ_a,n+1 Δγ_a A_e |
 | `D_midpoint_slip` | GPa·µm² | Σ_e Σ_a ½(τ_a,n + τ_a,n+1) Δγ_a A_e (the value consistent with the trapezoidal energy identity) |
 | `alg_mid_minus_imp_cum` | GPa·µm² | cumulative Σ_steps (D_midpoint_slip − D_implicit_slip): the algorithmic dissipation, O(Δt²) per step, accumulated from the start of the run, relaxation included (from 0 again after a restart) |
-| `neg_D_elems` | – | elements with D < −10⁻¹⁴ in this step |
+| `neg_D_elems` | – | elements with D < −10⁻¹⁴ in this step (after every correction, as above) |
 | `min_D` | GPa | min_e D_e |
 | `stored_energy_rate` | GPa·µm²/ns | Σ_e Z Δρ_S A_e / Δt |
 | `cdstore` | – | always 1: storage is Clausius–Duhem capped |
@@ -210,7 +214,7 @@ Written once at the start; post-processing reads parameters from it.
 | `slip_systems_lattice` | s, n and weight f for each system |
 | `grain_theta0_rad` | the 8 grain angles (from `grain_angles_rad.txt`) |
 | `hardening`, `rate`, `mobile_drag`, `kwc`, `thermal`, `elastic_law` | the parameters in the formulas above |
-| `safeguards`, `robustness`, `tangent`, `newton` | solver settings |
+| `safeguards`, `robustness`, `tangent`, `newton` | solver settings (`tangent.element_map` = "forward-mode AD (kwc2d)"; runs made before 2026-11 list the central-difference steps `fdk`, `fdq` instead) |
 | `kinematics`, `fields_note` | text description of the kinematics and of the VTU fields |
 
 ## Post-processing outputs
