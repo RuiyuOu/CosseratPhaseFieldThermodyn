@@ -1,0 +1,46 @@
+runs: a90_up400ms_v2_kt3pcgtc (dt=0.01), a90_up400ms_dt0.005_v2_kt3pcgtc (dt=0.005), a90_up400ms_dt0.0025_v2_kt3pcgtc (dt=0.0025), a90_up400ms_dt0.00125_v2_kt3pcgtc (dt=0.00125)  -> reference = last
+note: no relaxed frame in the run folders; reference state = the reference-run frame at t = 0.1 ns (denominators: change since then; errors start after it)
+frames compared: 30 (t = 0.5 ... 15.0 ns)
+
+space-time errors vs the dt/8 reference, relative to the change since the reference state (dt = 0.01, dt/2, dt/4):
+  field              norm             e(dt)   e(dt/2)   e(dt/4)    p12 n   p23 n    p12 c   p23 c  e_true(dt)
+  theta_lattice_deg  L2(t;L2)      3.43e-02  5.92e-03  1.22e-03     2.53    2.28     2.50    1.94    3.47e-02
+  theta_lattice_deg  Linf(t;P99)   6.48e-02  1.31e-02  3.29e-03     2.30    1.99     2.25    1.58    6.64e-02
+  theta_lattice_deg  Linf(t;Linf)  1.50e-01  5.50e-02  1.17e-02     1.45    2.23     1.28    1.89    1.54e-01
+  phi                L2(t;L2)      4.52e-02  1.01e-02  2.00e-03     2.16    2.34     2.10    2.02    4.59e-02
+  phi                Linf(t;P99)   3.66e-01  1.09e-01  1.42e-02     1.75    2.94     1.64    2.74    3.70e-01
+  phi                Linf(t;Linf)  3.78e-01  1.56e-01  3.46e-02     1.28    2.17     1.08    1.81    3.92e-01
+  T                  L2(t;L2)      4.70e-03  1.80e-03  6.79e-04     1.38    1.41     1.20    0.73    5.73e-03
+  T                  Linf(t;P99)   1.02e-02  2.26e-03  8.40e-04     2.18    1.43     2.12    0.76    1.15e-02
+  T                  Linf(t;Linf)  1.09e-02  2.33e-03  8.59e-04     2.22    1.44     2.16    0.78    1.21e-02
+  u                  L2(t;L2)      4.72e-03  6.98e-04  2.18e-04     2.76    1.68     2.73    1.13    4.90e-03
+  u                  Linf(t;P99)   8.67e-03  9.94e-04  4.15e-04     3.12    1.26     3.11    0.48    9.67e-03
+  u                  Linf(t;Linf)  8.90e-03  1.10e-03  4.46e-04     3.01    1.31     2.99    0.56    9.84e-03
+  v                  L2(t;L2)      2.89e-02  1.34e-02  8.77e-03     1.11    0.61     0.85   -0.93    5.00e-02
+  v                  Linf(t;P99)   5.80e-02  3.23e-02  2.23e-02     0.84    0.54     0.46   -1.15    1.12e-01
+  v                  Linf(t;Linf)  2.90e-01  8.90e-02  3.45e-02     1.70    1.37     1.59    0.66    3.49e-01
+  slip_path_phys     L2(t;L2)      9.30e-03  2.03e-03  6.85e-04     2.20    1.57     2.14    0.97    1.00e-02
+  slip_path_phys     Linf(t;P99)   2.75e-02  4.64e-03  1.42e-03     2.57    1.70     2.53    1.18    2.86e-02
+  slip_path_phys     Linf(t;Linf)  4.86e-02  8.76e-03  4.04e-03     2.47    1.12     2.43    0.23    5.83e-02
+  rhoS               L2(t;L2)      6.57e-02  1.77e-02  7.01e-03     1.89    1.34     1.80    0.61    7.91e-02
+  rhoS               Linf(t;P99)   1.63e-01  4.32e-02  1.43e-02     1.92    1.60     1.83    1.02    1.77e-01
+  rhoS               Linf(t;Linf)  6.28e-01  4.64e-01  4.07e-01     0.44    0.19      nan   -2.81    1.61e+00
+  rhoG               L2(t;L2)      6.60e-02  1.50e-02  3.62e-03     2.14    2.05     2.07    1.65    6.77e-02
+  rhoG               Linf(t;P99)   5.28e-02  1.08e-02  2.55e-03     2.29    2.08     2.24    1.70    5.40e-02
+  rhoG               Linf(t;Linf)  6.82e-02  2.24e-02  6.11e-03     1.61    1.87     1.48    1.41    7.18e-02
+  wstar              L2(t;L2)      1.09e-01  1.87e-02  2.74e-03     2.54    2.77     2.50    2.54    1.10e-01
+  wstar              Linf(t;P99)   1.14e-01  2.18e-02  2.39e-03     2.38    3.19     2.34    3.02    1.15e-01
+  wstar              Linf(t;Linf)  1.02e-01  2.51e-02  1.10e-02     2.03    1.20     1.95    0.37    1.29e-01
+  tau_c              L2(t;L2)      3.47e-02  8.45e-03  3.28e-03     2.04    1.37     1.96    0.66    4.04e-02
+  tau_c              Linf(t;P99)   1.30e-01  2.27e-02  8.66e-03     2.52    1.39     2.48    0.70    1.44e-01
+  tau_c              Linf(t;Linf)  2.39e-01  1.87e-01  1.47e-01     0.36    0.34      nan   -1.89    5.95e-01
+
+domain integrals from the VTU (history L2(0,T)):
+  mean_phi           e  4.66e-03  9.13e-04  2.09e-04  p23c  1.75  e_true(dt)  4.75e-03
+  mean_T             e  4.10e-04  1.37e-04  4.51e-05  p23c  1.03  e_true(dt)  4.54e-04
+  mean_rhoS          e  9.08e-03  2.92e-03  1.04e-03  p23c  0.86  e_true(dt)  1.03e-02
+  mean_rhoG          e  9.48e-03  1.09e-03  2.07e-04  p23c  2.09  e_true(dt)  9.55e-03
+  mean_slip_path_phys e  2.63e-03  5.62e-04  2.32e-04  p23c  0.51  e_true(dt)  3.18e-03
+  mean_wstar         e  1.09e-01  1.37e-02  3.52e-04  p23c  5.24  e_true(dt)  1.09e-01
+  mean_tau_c         e  6.45e-03  1.21e-03  3.98e-04  p23c  1.03  e_true(dt)  6.83e-03
+written to post/time_convergence_dt8

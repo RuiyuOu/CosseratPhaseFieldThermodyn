@@ -1,0 +1,20 @@
+runs: a90_up400ms_dt0.005_v2_kt3pcgtc (dt=0.005), a90_up400ms_dt0.0025_v2_kt3pcgtc (dt=0.0025), a90_up400ms_dt0.00125_v2_kt3pcgtc (dt=0.00125)
+global histories on 3000 common times, 0 .. 15.0 ns
+  load_GPa        e(dt) nan  e(dt/2) nan  p   nan  Richardson E(dt) nan
+  KE_trans        e(dt) 1.69e-03  e(dt/2) 5.69e-04  p  0.98  Richardson E(dt) 2.28e-03
+  E_elastic       e(dt) 2.00e-03  e(dt/2) 7.32e-04  p  0.80  Richardson E(dt) 2.99e-03
+  E_stored        e(dt) 1.86e-03  e(dt/2) 6.42e-04  p  0.99  Richardson E(dt) 2.57e-03
+  Q_heat          e(dt) 3.87e-04  e(dt/2) 1.28e-04  p  1.18  Richardson E(dt) 5.17e-04
+  W_ext           e(dt) nan  e(dt/2) nan  p   nan  Richardson E(dt) nan
+  D_cum           e(dt) 3.87e-04  e(dt/2) 1.28e-04  p  1.18  Richardson E(dt) 5.17e-04
+  mean_abs_slip   e(dt) 9.39e-04  e(dt/2) 2.36e-04  p  1.62  Richardson E(dt) 1.08e-03
+  max_dT          e(dt) 1.70e-03  e(dt/2) 6.30e-04  p  0.77  Richardson E(dt) 2.60e-03
+  mean_rhoS_um2   e(dt) 2.91e-03  e(dt/2) 1.02e-03  p  0.93  Richardson E(dt) 4.08e-03
+note: no relaxed frame in the run folders; reference state = the finest-dt frame at t = 0.1 ns (denominators: change since then; errors start after it)
+fields at 30 times
+C1_order: FAIL
+C2_global: FAIL
+C3_fields: FAIL
+C4_grains: PASS
+verdict: production dt NOT converged by these criteria
+written to post/time_convergence_dt8

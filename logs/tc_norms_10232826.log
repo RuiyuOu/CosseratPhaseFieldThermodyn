@@ -1,0 +1,2 @@
+runs: a90_up400ms_v2_kt3pcgtc (dt=0.01), a90_up400ms_dt0.005_v2_kt3pcgtc (dt=0.005), a90_up400ms_dt0.0025_v2_kt3pcgtc (dt=0.0025)
+no relaxed frame (<tag>_relaxed.vtu or a t = 0 entry in the .pvd) in any run folder; files named *relax* found: []

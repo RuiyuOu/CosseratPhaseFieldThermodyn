@@ -1,0 +1,46 @@
+runs: a90_up400ms_dt0.005_v2_kt3pcgtc (dt=0.005), a90_up400ms_dt0.0025_v2_kt3pcgtc (dt=0.0025), a90_up400ms_dt0.00125_v2_kt3pcgtc (dt=0.00125)
+note: no relaxed frame in the run folders; reference state = the dt/4 frame at t = 0.1 ns (denominators: change since then; errors start after it)
+frames compared: 30 (t = 0.5 ... 15.0 ns)
+
+space-time errors, relative to the change since the relaxed state (Richardson estimate for the production dt):
+  field              norm             e(dt)   e(dt/2)      p Richardson    times<=5%
+  theta_lattice_deg  L2(t;L2)      5.92e-03  1.22e-03   2.12   7.08e-03         1.00
+  theta_lattice_deg  Linf(t;P99)   1.31e-02  3.29e-03   1.87   1.66e-02         1.00
+  theta_lattice_deg  Linf(t;Linf)  5.50e-02  1.17e-02   2.03   6.37e-02         0.93
+  phi                L2(t;L2)      1.01e-02  2.00e-03   2.14   1.18e-02         0.97
+  phi                Linf(t;P99)   1.09e-01  1.42e-02   2.78   1.30e-01         0.90
+  phi                Linf(t;Linf)  1.56e-01  3.46e-02   1.91   1.77e-01         0.57
+  T                  L2(t;L2)      1.80e-03  6.79e-04   0.80   2.78e-03         1.00
+  T                  Linf(t;P99)   2.26e-03  8.40e-04   0.92   3.37e-03         1.00
+  T                  Linf(t;Linf)  2.33e-03  8.59e-04   1.32   3.58e-03         1.00
+  u                  L2(t;L2)      6.98e-04  2.18e-04   1.22   8.92e-04         1.00
+  u                  Linf(t;P99)   9.94e-04  4.15e-04   0.83   1.69e-03         1.00
+  u                  Linf(t;Linf)  1.10e-03  4.46e-04   0.86   1.80e-03         1.00
+  v                  L2(t;L2)      1.34e-02  8.77e-03   0.56   4.03e-02         0.90
+  v                  Linf(t;P99)   3.23e-02  2.23e-02   0.51   1.07e-01         0.73
+  v                  Linf(t;Linf)  8.90e-02  3.45e-02   1.15   1.39e-01         0.57
+  slip_path_phys     L2(t;L2)      2.03e-03  6.85e-04   1.27   2.82e-03         1.00
+  slip_path_phys     Linf(t;P99)   4.64e-03  1.42e-03   1.44   6.12e-03         1.00
+  slip_path_phys     Linf(t;Linf)  8.76e-03  4.04e-03   0.73   1.69e-02         1.00
+  rhoS               L2(t;L2)      1.77e-02  7.01e-03   0.98   2.80e-02         0.97
+  rhoS               Linf(t;P99)   4.32e-02  1.43e-02   1.29   5.90e-02         0.80
+  rhoS               Linf(t;Linf)  4.64e-01  4.07e-01  -0.12   1.28e+00         0.10
+  rhoG               L2(t;L2)      1.50e-02  3.62e-03   1.85   1.80e-02         1.00
+  rhoG               Linf(t;P99)   1.08e-02  2.55e-03   1.91   1.30e-02         1.00
+  rhoG               Linf(t;Linf)  2.24e-02  6.11e-03   1.78   2.95e-02         0.70
+  wstar              L2(t;L2)      1.87e-02  2.74e-03   2.65   2.29e-02         1.00
+  wstar              Linf(t;P99)   2.18e-02  2.39e-03   3.06   2.67e-02         1.00
+  wstar              Linf(t;Linf)  2.51e-02  1.10e-02   1.09   4.40e-02         1.00
+  tau_c              L2(t;L2)      8.45e-03  3.28e-03   1.02   1.31e-02         1.00
+  tau_c              Linf(t;P99)   2.27e-02  8.66e-03   1.05   3.47e-02         1.00
+  tau_c              Linf(t;Linf)  1.87e-01  1.47e-01   0.46   6.91e-01         0.17
+
+domain integrals from the VTU (history L2(0,T)):
+  mean_phi           e(dt)  9.13e-04 e(dt/2)  2.09e-04 p  1.89 Richardson  1.06e-03   end 0.53814 0.53827 0.53836
+  mean_T             e(dt)  1.37e-04 e(dt/2)  4.51e-05 p  1.18 Richardson  1.83e-04   end 489.02 488.96 488.96
+  mean_rhoS          e(dt)  2.92e-03 e(dt/2)  1.04e-03 p  0.90 Richardson  4.16e-03   end 865.62 865.12 864.45
+  mean_rhoG          e(dt)  1.09e-03 e(dt/2)  2.07e-04 p  2.41 Richardson  1.47e-03   end 289.13 289.14 289.16
+  mean_slip_path_phys e(dt)  5.62e-04 e(dt/2)  2.32e-04 p  0.54 Richardson  1.08e-03   end 0.65934 0.65952 0.65969
+  mean_wstar         e(dt)  1.37e-02 e(dt/2)  3.52e-04 p  5.27 Richardson  1.81e-02   end 0.008292 0.0081702 0.0081705
+  mean_tau_c         e(dt)  1.21e-03 e(dt/2)  3.98e-04 p  1.11 Richardson  1.60e-03   end 0.11487 0.11485 0.11481
+written to post/time_convergence_dt8

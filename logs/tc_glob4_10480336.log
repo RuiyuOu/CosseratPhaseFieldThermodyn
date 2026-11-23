@@ -1,0 +1,15 @@
+runs: a90_up400ms_v2_kt3pcgtc (dt=0.01), a90_up400ms_dt0.005_v2_kt3pcgtc (dt=0.005), a90_up400ms_dt0.0025_v2_kt3pcgtc (dt=0.0025), a90_up400ms_dt0.00125_v2_kt3pcgtc (dt=0.00125)  -> reference = last
+global histories on 1500 common times, 0 .. 15 ns; errors vs the dt/8 reference (dt = 0.01, dt/2, dt/4)
+  quantity            e(dt)   e(dt/2)   e(dt/4)    p12 n   p23 n    p12 c   p23 c  e_true(dt)
+  load_GPa              nan       nan       nan      nan     nan      nan     nan         nan
+  KE_trans         4.35e-03  1.69e-03  5.69e-04     1.37    1.57     1.19    0.97    4.94e-03
+  E_elastic        2.87e-03  2.00e-03  7.32e-04     0.52    1.45      nan    0.80    3.86e-03
+  E_stored         9.54e-03  1.86e-03  6.42e-04     2.35    1.54     2.31    0.93    1.02e-02
+  Q_heat           1.16e-03  3.87e-04  1.28e-04     1.58    1.60     1.45    1.02    1.28e-03
+  W_ext                 nan       nan       nan      nan     nan      nan     nan         nan
+  D_cum            1.16e-03  3.87e-04  1.28e-04     1.58    1.60     1.45    1.02    1.28e-03
+  mean_abs_slip    6.83e-03  9.39e-04  2.36e-04     2.86    1.99     2.84    1.57    6.95e-03
+  max_dT           3.34e-03  1.70e-03  6.30e-04     0.97    1.43     0.66    0.77    4.24e-03
+  mean_rhoS_um2    9.10e-03  2.91e-03  1.02e-03     1.64    1.52     1.52    0.90    1.03e-02
+worst e_true(dt): mean_rhoS_um2 1.03e-02  (> 1 %)
+written to post/time_convergence_dt8
