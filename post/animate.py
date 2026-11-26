@@ -20,6 +20,7 @@ ANIMS = {
  'temperature': ('Temperature rise $T-300$', 'dT', 'inferno', False, False, 'K'),
  'deformation': ('Deformation $|u|$ (displacement magnified, see label)', 'umag', 'cividis', False, False, 'nm'),
  'slip_acc': ('Accumulated slip $\\sum_\\alpha\\int|\\dot\\gamma_\\alpha|dt$ (all systems)', 'slip_path_eff', 'turbo', False, True, 'shear strain'),
+ 'slip_rate': ('Accumulated slip rate $\\Delta(\\sum_\\alpha\\int|\\dot\\gamma_\\alpha|dt)/\\Delta t$ (since the previous snapshot)', 'slip_rate', 'turbo', False, True, '1/ns'),
  'slip_sys1': ('Accumulated signed slip $\\gamma_1$ (system 1)', 'p1', 'RdBu_r', True, False, 'shear strain'),
  'slip_sys2': ('Accumulated signed slip $\\gamma_2$ (system 2)', 'p2', 'RdBu_r', True, False, 'shear strain'),
  'slip_sys3': ('Accumulated signed slip $\\gamma_3$ (system 3)', 'p3', 'RdBu_r', True, False, 'shear strain'),
@@ -36,6 +37,13 @@ def get(i):
     t, f = FR[i]; d = w.load(f, M); o = w.derived(M, d); o['phi'] = d['phi']; o['thdot'] = d['thdot']
     o['u'] = d['u']; o['rot'] = ((o['thl'] - THL0 + 180.0) % 360.0) - 180.0
     if 'rho_mob' in d: o['rho_mob'] = d['rho_mob']*1e12; o['eta_drag'] = d['eta_drag']   # um^-2 -> m^-2; GPa ns = Pa s
+    # accumulated slip rate: backward difference of slip_path_eff between this snapshot and the previous one (an average over that
+    # interval, not the instantaneous rate); 0 at the first frame; a decrease (a reset of the slip path) is shown as 0
+    if i > 0:
+        tp, fp = FR[i-1]; sp = w.load(fp, M)['slip_path_eff']
+        o['slip_rate'] = np.maximum(d['slip_path_eff'] - sp, 0.0) / max(t - tp, 1e-12)
+    else:
+        o['slip_rate'] = np.zeros_like(d['slip_path_eff'])
     return t, o
 def limits(keys=None):
     # keys: only these fields (a field added after an earlier call); None = everything incl. the displacement magnification and slip scale

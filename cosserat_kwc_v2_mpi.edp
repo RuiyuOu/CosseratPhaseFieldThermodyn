@@ -62,7 +62,7 @@ real tau0 = 0.001, lamT = 0.3;    // GPa
 real rho0 = 10.;                  // um^-2  (1e13 m^-2)
 real g0 = 1e-6, mexp = 50.;       // 1/ns, rate exponent
 real B0 = 2e-5;                   // GPa ns (2e-5 Pa s) at T0
-real Kkmt = 0.05, dkmt = 5e-4;    // KMT storage, d in um
+real Kkmt = atof(arg("-kmtk", "0.05")), dkmt = atof(arg("-kmtd", "5e-4"));    // KMT storage, d in um
 real chi = 1.0;
 real T0 = 300., alphaMu = 3.8e-4;
 real rhoC = 3.45e-3, kth = 4e-4;  // GPa/K, GPa um^2/(ns K)

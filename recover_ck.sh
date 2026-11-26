@@ -26,13 +26,13 @@ for D in "$@"; do
   G=$(gen_of "$best"); NG=$CK.g${nb}_rb_$(date +%s)_$$
   # 1. prepare a uniquely named generation; the live manifest is not touched until every step has succeeded
   fail=0
-  for suf in "" .rhoM .gnd .lam .thk .plate; do
+  for suf in "" .rhoM .gnd .lam .thk .plate .mult; do
     if [ -e "$G$suf" ]; then ln -f "$G$suf" "$NG$suf" 2>/dev/null || cp -f "$G$suf" "$NG$suf" || { fail=1; break; }; fi
   done
   # required components: the state and its rho_M file must be present and non-empty, and the step must match
   if [ $fail = 0 ]; then
     { [ -s "$NG" ] && [ -s "$NG.rhoM" ] && [ "$(head -1 "$NG")" = "$nb" ]; } || fail=1
-    for suf in .gnd .lam .thk .plate; do [ -e "$G$suf" ] && { [ -s "$NG$suf" ] || fail=1; }; done
+    for suf in .gnd .lam .thk .plate .mult; do [ -e "$G$suf" ] && { [ -s "$NG$suf" ] || fail=1; }; done
   fi
   GC=0; [ -s "$best.manifest" ] && GC=$(sed -n 4p "$best.manifest")
   if [ $fail = 0 ]; then
@@ -42,12 +42,12 @@ for D in "$@"; do
   if [ $fail = 0 ] && [ -s "$CK.manifest" ]; then cp -f "$CK.manifest" "$D/${B}_ck_bad${NBAD}.txt.manifest" || fail=1; fi
   if [ $fail = 0 ]; then mv -f "$CK.manifest.tmp" "$CK.manifest" || fail=1; fi
   if [ $fail != 0 ]; then
-    rm -f "$NG" "$NG".rhoM "$NG".gnd "$NG".lam "$NG".thk "$NG".plate "$CK.manifest.tmp"
+    rm -f "$NG" "$NG".rhoM "$NG".gnd "$NG".lam "$NG".thk "$NG".plate "$NG".mult "$CK.manifest.tmp"
     echo "$D: RECOVERY FAILED (file operation); live manifest and stop markers left unchanged" >&2
     rc=1; continue
   fi
   # 3. committed: refresh the convenience links (best effort; the manifest is authoritative) and clear the markers
-  for suf in "" .rhoM .gnd .lam .thk .plate; do
+  for suf in "" .rhoM .gnd .lam .thk .plate .mult; do
     if [ -e "$NG$suf" ]; then ln -f "$NG$suf" "$CK$suf" 2>/dev/null || echo "$D: warning: could not refresh $CK$suf (manifest is authoritative)" >&2; else rm -f "$CK$suf"; fi
   done
   # drop the blown-up stop frame from the ParaView series (the frames after the checkpoint are rewritten on resume)

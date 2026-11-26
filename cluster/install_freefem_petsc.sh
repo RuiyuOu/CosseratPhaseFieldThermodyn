@@ -21,15 +21,19 @@
 # The compiler and MPI chosen here must be the ones the jobs load: the module file loads them.
 set -uo pipefail
 FF_VERSION=${FF_VERSION:-4.15}
-PREFIX=${PREFIX:-$HOME/sw/freefem/$FF_VERSION}
+# CUDA=1 (not yet tested): a separate GPU build (PETSc with CUDA: aijcusparse/cuda types, hypre and GAMG on the GPU), installed next to the CPU one as
+# freefem/<v>-cuda.  CUDA_MODULE (default "cuda") is added to MODULES; CUDA_ARCH (default 90 = H100).  The FreeFEM part stays CPU code.
+CUDA=${CUDA:-0}; VTAG=$FF_VERSION; [ "$CUDA" = 1 ] && VTAG=$FF_VERSION-cuda
+PREFIX=${PREFIX:-$HOME/sw/freefem/$VTAG}
 WORKDIR=/work/users/${USER:0:1}/${USER:1:1}/$USER
 [ -d "$WORKDIR" ] || WORKDIR=$HOME
-BUILD=${BUILD:-$WORKDIR/build/freefem-$FF_VERSION}
+BUILD=${BUILD:-$WORKDIR/build/freefem-$VTAG}
 case "$(hostname -f 2>/dev/null || hostname)" in
   *longleaf*) DEFMOD="gcc/12.2.0 openmpi/5.0.6-gcc_12.2.0 autoconf/2.71" ;;
   *) DEFMOD="gcc/13.3.0 openmpi/5.0.6/gcc_13.3.0" ;;
 esac
 MODULES=${MODULES:-$DEFMOD}
+[ "$CUDA" = 1 ] && MODULES="$MODULES ${CUDA_MODULE:-cuda}"
 MODDIR=${MODDIR:-$HOME/modulefiles}
 if [ -z "${JOBS:-}" ]; then if [ -n "${SLURM_CPUS_PER_TASK:-}" ]; then JOBS=$SLURM_CPUS_PER_TASK; else JOBS=8; fi; fi
 SRC=$BUILD/FreeFem-sources
@@ -54,7 +58,7 @@ echo "  cmake: $(command -v cmake)  $(cmake --version | head -1)"
 for t in cmake gcc g++ gfortran mpicc mpicxx mpif90 autoreconf automake libtool make patch m4 bison flex git wget; do command -v $t >/dev/null || { echo "FAILED: $t not found after 'module load $MODULES'"; exit 1; }; done
 export CC=gcc CXX=g++ FC=gfortran F77=gfortran MPICC=mpicc MPICXX=mpicxx MPIFC=mpif90
 mkdir -p "$BUILD"
-echo "FreeFEM $FF_VERSION -> $PREFIX   build: $BUILD   modules: $MODULES   jobs: $JOBS"
+echo "FreeFEM $VTAG -> $PREFIX   build: $BUILD   modules: $MODULES   jobs: $JOBS"
 echo "  $(gcc --version | head -1);  $(mpicc --version 2>/dev/null | head -1);  mpiexec: $(command -v mpiexec)"
 
 run() {   # run <stage> <command...>: log, and stop on failure with the tail of the log
@@ -72,10 +76,18 @@ CONF="--enable-download --enable-optim --disable-bemtool --prefix=$PREFIX"
 GETALL=${GETALL:-ARPACK,BLAS,OpenBLAS,FFTW,freeYams,Gmm++,Ipopt,METIS,ParMETIS,MMG3D,mshmet,MUMPS,NLopt,ScaLAPACK,Scotch,SuiteSparse,SuperLU,TetGen,mmg,parmmg,PETSc,htool,hpddm,libpthread-google}
 st_configure() { cd "$SRC" && ./configure $CONF; }
 st_getall() { cd "$SRC" && ./3rdparty/getall -a -o "$GETALL" && ./configure $CONF; }   # configure again so the downloads are picked up
-st_petsc() { cd "$SRC/3rdparty/ff-petsc" && make petsc-slepc && cd "$SRC" && ./reconfigure; }
+st_petsc() {
+  cd "$SRC/3rdparty/ff-petsc" || return 1
+  if [ "$CUDA" = 1 ]; then   # FreeFEM's PETSc recipe disables CUDA; switch it on (idempotent)
+    command -v nvcc >/dev/null || { echo "nvcc not found after 'module load $MODULES' (set CUDA_MODULE)"; return 1; }
+    grep -q -- "--with-cudac=0" Makefile && sed -i "s|--with-cudac=0|--with-cuda=1 --with-cudac=nvcc --with-cuda-arch=${CUDA_ARCH:-90}|" Makefile
+    grep -n -- "--with-cuda" Makefile | head -3
+  fi
+  make petsc-slepc && cd "$SRC" && ./reconfigure
+}
 st_build() { cd "$SRC" && make -j"$JOBS"; }
 st_install() { cd "$SRC" && make install; }
-st_module() { MODULES="$MODULES" MODDIR="$MODDIR" FF_VERSION="$FF_VERSION" bash "$(dirname "${BASH_SOURCE[0]}")/write_modulefile.sh" "$PREFIX"; }
+st_module() { MODULES="$MODULES" MODDIR="$MODDIR" FF_VERSION="$VTAG" bash "$(dirname "${BASH_SOURCE[0]}")/write_modulefile.sh" "$PREFIX"; }
 for stage in "$@"; do
   case $stage in
     all) for s in fetch configure getall petsc build install module; do run $s st_$s; done ;;
@@ -84,4 +96,4 @@ for stage in "$@"; do
     *) echo "unknown stage $stage"; exit 1 ;;
   esac
 done
-case " $* " in *" module "*|*" all "*) echo; echo "use it:  module use $MODDIR; module load freefem/$FF_VERSION      then: sbatch cluster/test_install.sbatch";; esac
+case " $* " in *" module "*|*" all "*) echo; echo "use it:  module use $MODDIR; module load freefem/$VTAG      then: sbatch cluster/test_install.sbatch";; esac

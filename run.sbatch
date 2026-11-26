@@ -4,6 +4,7 @@
 #SBATCH -N 1
 #SBATCH -n 16
 #SBATCH --mem=48G
+#SBATCH --hint=nomultithread   # one rank per physical core (the node may still ignore it: run.sh checks, HWGUARD)
 #SBATCH -t 24:00:00
 #SBATCH --array=0-5
 #SBATCH -o logs/impact_%A_%a.log
@@ -16,7 +17,7 @@ module use "$HOME/modulefiles"
 module load freefem/4.15 sqlite/3.45.0
 # (load here the MPI module FreeFem++-mpi was built with, if the freefem module does not load it)
 mkdir -p logs
-UPS=(25 50 100 150 250 400)
+UPS=(25 50 100 150 250 400 500 600 700)
 ID=${SLURM_ARRAY_TASK_ID:-0}
 UP=${UPS[$ID]}
 echo "task $ID: plate $UP m/s at ${ANGLE:-45} deg, tend ${TEND:-30} ns, ${MODE:-mpi}"

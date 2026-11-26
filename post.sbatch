@@ -17,7 +17,7 @@ module purge
 module load python3 2>/dev/null || true
 [ -f "$HOME/dynpost_venv/bin/activate" ] && source "$HOME/dynpost_venv/bin/activate"
 python3 -c "import numpy, scipy, matplotlib, meshio, PIL" || { echo "FAILED: run 'bash setup_py.sh' once on the login node"; exit 1; }
-UPS=(25 50 100 150 250 400)
+UPS=(25 50 100 150 250 400 500 600 700)
 ID=${SLURM_ARRAY_TASK_ID:-0}
 MODE=${MODE:-mpi}; UPMS=${UPS[$ID]}; source ./tag.sh || exit 1
 [ -s out_$TAG/$TAG.pvd ] && ls out_$TAG/${TAG}_s*.vtu >/dev/null 2>&1 || { echo "skip $TAG: no frames in out_$TAG"; exit 0; }
