@@ -1,0 +1,4 @@
+grain_i,grain_j,misorient_deg,misorient_sym_deg,length_um,width_um,mean_phi_at_edge
+0,1,81.715,81.715,7.161,4.154,0.440
+0,2,6.065,6.065,7.180,7.380,0.361
+1,2,87.779,87.779,8.704,8.055,0.494
