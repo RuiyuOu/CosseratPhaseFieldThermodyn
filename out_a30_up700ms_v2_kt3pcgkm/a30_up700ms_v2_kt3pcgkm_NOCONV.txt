@@ -1,0 +1,1 @@
+global iteration did not converge at step 415 (t=3.15 ns) after a retry with a fresh tangent; checkpoint = end of step 414.
