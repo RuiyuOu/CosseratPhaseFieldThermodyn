@@ -1,0 +1,73 @@
+[09:00:19] HOST c151403 | AMD EPYC 7763 64-Core Processor | job 10883328 cpus 72,84,85,90,92,96,97,102,103,106,108,112-116,200,212,213,218,220,224,225,230,231,234,236,240-244 = 16 physical cores for 16 ranks | load 149.19 149.66 145.25 | step 0
+[09:00:19] code version 8.0
+[09:00:19] solver frozen: files match SOLVER_SHA256
+[09:00:19] /nas/longleaf/rhel9/apps/openmpi/5.0.6/gcc12/bin/mpiexec -n 16 --bind-to none FreeFem++-mpi cosserat_kwc_v2_mpi.edp (16 ranks)
+GND measure: Cermelli-Gurtin g = c/Jp (planar curl of Fp), rho_G = |g|/b, no reference subtraction
+plate impact: up=0.0647048 ut=0.241481 um/ns  j=0 um^2  muc=754  dt=0.01  steps=3100  nt=58391  ndof=263775  MPI ranks=16 (rank-0 subdomain nt=3795)
+no out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.mult for step 100: multiplier / dual flux start cold
+rho_M initialised quasi-steady (no side file)
+NOTE: no usable out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.plate for step 100 (missing, other step, unrecognised layout or incomplete): the plate-work ledger and audit_full are UNAVAILABLE for the first step after the restart (nan) and start from a new baseline after it
+restarted from out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt at step 100 t=0
+relaxfix: end-of-relaxation reset applied to the relaxed checkpoint
+bckin: prescribed-dof kinematics reset on restart (max |v| 0, max |a| 0 before)
+relaxfix: E0=0.0374435
+step 150 t=0.5 it=7 KE=1.43875 Wext=0 res=-2.83307 maxslip=0.00929937 dTmax=5.4656  wall=450.201 s (cpu 433.343 s)
+step 200 t=1 it=7 KE=4.88533 Wext=0 res=-9.64919 maxslip=0.0302668 dTmax=26.1107  wall=1003.8 s (cpu 966.716 s)
+step 250 t=1.5 it=9 KE=7.7684 Wext=0 res=-15.5898 maxslip=0.0658412 dTmax=59.7332  wall=1644.12 s (cpu 1584.36 s)
+step 300 t=2 it=11 KE=9.92192 Wext=0 res=-20.3387 maxslip=0.116496 dTmax=99.2195  wall=2359.72 s (cpu 2272.25 s)
+step 350 t=2.5 it=11 KE=10.9985 Wext=0 res=-23.7016 maxslip=0.173994 dTmax=138.194  wall=3091.61 s (cpu 2978.23 s)
+step 400 t=3 it=12 KE=8.90426 Wext=0 res=-24.1011 maxslip=0.217203 dTmax=157.581  wall=3922.19 s (cpu 3780.06 s)
+step 450 t=3.5 it=13 KE=5.53929 Wext=0 res=-24.1157 maxslip=0.230076 dTmax=162.632  wall=4859.42 s (cpu 4685.57 s)
+step 500 t=4 it=11 KE=3.61728 Wext=0 res=-24.1176 maxslip=0.222925 dTmax=178.603  wall=5747.09 s (cpu 5544.31 s)
+step 550 t=4.5 it=12 KE=2.88767 Wext=0 res=-24.1131 maxslip=0.222736 dTmax=191.383  wall=6640.66 s (cpu 6408.28 s)
+step 600 t=5 it=11 KE=2.31254 Wext=0 res=-24.1083 maxslip=0.233234 dTmax=194.64  wall=7540.24 s (cpu 7276.82 s)
+step 650 t=5.5 it=12 KE=2.004 Wext=0 res=-24.1082 maxslip=0.244973 dTmax=191.369  wall=8531.85 s (cpu 8236.33 s)
+step 700 t=6 it=11 KE=1.85969 Wext=0 res=-24.1089 maxslip=0.249129 dTmax=188.033  wall=9572.57 s (cpu 9245.94 s)
+step 750 t=6.5 it=11 KE=1.74564 Wext=0 res=-24.1093 maxslip=0.261651 dTmax=185.386  wall=10634.6 s (cpu 10277.2 s)
+step 800 t=7 it=11 KE=1.55736 Wext=0 res=-24.1095 maxslip=0.27915 dTmax=184.074  wall=11784.3 s (cpu 11394.1 s)
+step 850 t=7.5 it=11 KE=1.43932 Wext=0 res=-24.1097 maxslip=0.288286 dTmax=182.099  wall=12872.7 s (cpu 12449.8 s)
+step 900 t=8 it=12 KE=1.41568 Wext=0 res=-24.11 maxslip=0.291776 dTmax=179.675  wall=13924.5 s (cpu 13468.2 s)
+step 950 t=8.5 it=12 KE=1.28404 Wext=0 res=-24.11 maxslip=0.292217 dTmax=177.974  wall=15023.1 s (cpu 14530.9 s)
+step 1000 t=9 it=11 KE=1.14487 Wext=0 res=-24.1101 maxslip=0.307675 dTmax=176.756  wall=16136 s (cpu 15610.3 s)
+step 1050 t=9.5 it=11 KE=1.07562 Wext=0 res=-24.1101 maxslip=0.34085 dTmax=174.847  wall=17323.4 s (cpu 16762.3 s)
+step 1100 t=10 it=12 KE=1.03041 Wext=0 res=-24.1102 maxslip=0.345581 dTmax=172.969  wall=18396.6 s (cpu 17796.1 s)
+step 1150 t=10.5 it=11 KE=0.935246 Wext=0 res=-24.1102 maxslip=0.349149 dTmax=171.559  wall=19418.9 s (cpu 18786.3 s)
+step 1200 t=11 it=12 KE=0.849205 Wext=0 res=-24.1102 maxslip=0.384881 dTmax=170.445  wall=20404.3 s (cpu 19740 s)
+step 1250 t=11.5 it=12 KE=0.786088 Wext=0 res=-24.1102 maxslip=0.423603 dTmax=169.212  wall=21415.9 s (cpu 20721.6 s)
+step 1300 t=12 it=11 KE=0.718159 Wext=0 res=-24.1102 maxslip=0.462916 dTmax=168.064  wall=22447.7 s (cpu 21724.7 s)
+step 1350 t=12.5 it=12 KE=0.650707 Wext=0 res=-24.1102 maxslip=0.484968 dTmax=166.902  wall=23458.6 s (cpu 22704.5 s)
+step 1400 t=13 it=11 KE=0.599602 Wext=0 res=-24.1103 maxslip=0.486086 dTmax=165.64  wall=24458.3 s (cpu 23675.9 s)
+step 1450 t=13.5 it=12 KE=0.540985 Wext=0 res=-24.1103 maxslip=0.488606 dTmax=164.532  wall=25423.5 s (cpu 24611.7 s)
+step 1500 t=14 it=12 KE=0.477859 Wext=0 res=-24.1103 maxslip=0.492698 dTmax=163.733  wall=26410.2 s (cpu 25569.7 s)
+step 1550 t=14.5 it=11 KE=0.429894 Wext=0 res=-24.1103 maxslip=0.50959 dTmax=162.856  wall=27424.3 s (cpu 26554.2 s)
+step 1600 t=15 it=11 KE=0.389527 Wext=0 res=-24.1103 maxslip=0.540929 dTmax=161.966  wall=28449.9 s (cpu 27550.3 s)
+step 1650 t=15.5 it=12 KE=0.341929 Wext=0 res=-24.1103 maxslip=0.56654 dTmax=161.04  wall=29491.7 s (cpu 28552.7 s)
+step 1700 t=16 it=12 KE=0.295639 Wext=0 res=-24.1103 maxslip=0.578844 dTmax=160.021  wall=30696 s (cpu 29711.7 s)
+step 1750 t=16.5 it=12 KE=0.257701 Wext=0 res=-24.1103 maxslip=0.582175 dTmax=159.014  wall=31858.4 s (cpu 30826.7 s)
+step 1800 t=17 it=11 KE=0.223116 Wext=0 res=-24.1103 maxslip=0.582583 dTmax=158.07  wall=32969.4 s (cpu 31902 s)
+step 1850 t=17.5 it=13 KE=0.189786 Wext=0 res=-24.1103 maxslip=0.582935 dTmax=157.2  wall=34143.5 s (cpu 33046.6 s)
+step 1900 t=18 it=13 KE=0.158026 Wext=0 res=-24.1103 maxslip=0.594525 dTmax=156.206  wall=35319.5 s (cpu 34193.1 s)
+step 1950 t=18.5 it=12 KE=0.128727 Wext=0 res=-24.1103 maxslip=0.60968 dTmax=155.125  wall=36464.8 s (cpu 35309 s)
+step 2000 t=19 it=12 KE=0.103635 Wext=0 res=-24.1103 maxslip=0.624229 dTmax=154.128  wall=37723.2 s (cpu 36536.2 s)
+step 2050 t=19.5 it=12 KE=0.0826161 Wext=0 res=-24.1103 maxslip=0.638518 dTmax=153.18  wall=38901.8 s (cpu 37680 s)
+step 2100 t=20 it=13 KE=0.0624278 Wext=0 res=-24.1103 maxslip=0.653087 dTmax=152.286  wall=39991.3 s (cpu 38735.6 s)
+step 2150 t=20.5 it=11 KE=0.0446065 Wext=0 res=-24.1104 maxslip=0.668349 dTmax=151.435  wall=41153.4 s (cpu 39856.9 s)
+step 2200 t=21 it=11 KE=0.0307682 Wext=0 res=-24.1104 maxslip=0.682866 dTmax=150.398  wall=42333.1 s (cpu 41001.7 s)
+step 2250 t=21.5 it=12 KE=0.0197814 Wext=0 res=-24.1104 maxslip=0.696882 dTmax=149.329  wall=43415.4 s (cpu 42052.2 s)
+step 2300 t=22 it=13 KE=0.0110913 Wext=0 res=-24.1104 maxslip=0.7094 dTmax=148.306  wall=44563.8 s (cpu 43166.9 s)
+step 2350 t=22.5 it=12 KE=0.00489284 Wext=0 res=-24.1104 maxslip=0.715555 dTmax=147.321  wall=45713 s (cpu 44283.7 s)
+step 2400 t=23 it=12 KE=0.00125447 Wext=0 res=-24.1104 maxslip=0.717786 dTmax=146.339  wall=46841.3 s (cpu 45378.7 s)
+step 2450 t=23.5 it=12 KE=0.000596892 Wext=0 res=-24.1104 maxslip=0.719297 dTmax=145.344  wall=48093.8 s (cpu 46599.5 s)
+step 2500 t=24 it=11 KE=0.00204551 Wext=0 res=-24.1104 maxslip=0.721481 dTmax=144.354  wall=49208.9 s (cpu 47684.2 s)
+[02:13:41] HOST c151416 | AMD EPYC 9654 96-Core Processor | job 10954100 cpus 7,9,10,22,35,47,56,79,83,94,97,139,141,142,164,184,199,201,202,214,227,239,248,271,275,286,289,331,333,334,356,376 = 16 physical cores for 16 ranks | load 247.89 258.40 268.81 | step 2547
+[02:13:41] code version 8.0
+[02:13:41] solver frozen: files match SOLVER_SHA256
+[02:13:41] /nas/longleaf/rhel9/apps/openmpi/5.0.6/gcc12/bin/mpiexec -n 16 --bind-to none FreeFem++-mpi cosserat_kwc_v2_mpi.edp (16 ranks)
+restart: out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.manifest -> generation out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.g2500_0 (step 2500)
+GND measure: Cermelli-Gurtin g = c/Jp (planar curl of Fp), rho_G = |g|/b, no reference subtraction
+plate impact: up=0.0647048 ut=0.241481 um/ns  j=0 um^2  muc=754  dt=0.01  steps=3100  nt=58391  ndof=263775  MPI ranks=16 (rank-0 subdomain nt=3795)
+multiplier / dual flux read from out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.g2500_0.mult
+rho_M read from out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.g2500_0.rhoM
+plate ledger read from out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.g2500_0.plate (layout PLATEv2): W_plate 24.0817, audit baseline 2.1059e-05, state 2
+restarted from out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.g2500_0 at step 2500 t=24
+bckin: prescribed-dof kinematics reset on restart (max |v| 0, max |a| 0 before)
