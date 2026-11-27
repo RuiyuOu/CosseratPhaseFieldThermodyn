@@ -1,0 +1,1 @@
+stopped at step 808 t=7.08 ns: max T = 1400.58 K exceeded tstop = 1400 K (or NaN)
