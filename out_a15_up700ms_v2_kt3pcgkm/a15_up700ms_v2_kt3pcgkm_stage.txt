@@ -1,0 +1,3 @@
+step 405  t=3.05 ns  global it 1000
+retry: residual (inertia + finite-strain elastic + KWC couple stress)
+wall 3593.5 s
