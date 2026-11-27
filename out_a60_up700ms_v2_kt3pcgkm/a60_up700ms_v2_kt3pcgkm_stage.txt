@@ -1,0 +1,3 @@
+step 734  t=6.34 ns  global it 9
+output: checkpoints
+wall 6660.31 s
