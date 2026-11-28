@@ -71,3 +71,92 @@ rho_M read from out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.g2500
 plate ledger read from out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.g2500_0.plate (layout PLATEv2): W_plate 24.0817, audit baseline 2.1059e-05, state 2
 restarted from out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt.g2500_0 at step 2500 t=24
 bckin: prescribed-dof kinematics reset on restart (max |v| 0, max |a| 0 before)
+step 2550 t=24.5 it=12 KE=0.0042295 Wext=0 res=-24.1104 maxslip=0.723547 dTmax=143.382  wall=814.247 s (cpu 787.418 s)
+step 2600 t=25 it=11 KE=0.00643096 Wext=0 res=-24.1104 maxslip=0.725287 dTmax=142.437  wall=1706.59 s (cpu 1649.63 s)
+step 2650 t=25.5 it=11 KE=0.00798527 Wext=0 res=-24.1104 maxslip=0.728292 dTmax=141.512  wall=2753.45 s (cpu 2664.09 s)
+step 2700 t=26 it=11 KE=0.00781881 Wext=0 res=-24.1104 maxslip=0.732558 dTmax=140.607  wall=3644.44 s (cpu 3523.39 s)
+step 2750 t=26.5 it=11 KE=0.00588238 Wext=0 res=-24.1104 maxslip=0.735868 dTmax=139.722  wall=4566.63 s (cpu 4414.47 s)
+step 2800 t=27 it=12 KE=0.00341909 Wext=0 res=-24.1104 maxslip=0.734632 dTmax=138.854  wall=5512.85 s (cpu 5326.95 s)
+step 2850 t=27.5 it=12 KE=0.00143974 Wext=0 res=-24.1104 maxslip=0.733182 dTmax=138.006  wall=6523 s (cpu 6304.18 s)
+step 2900 t=28 it=12 KE=0.000553651 Wext=0 res=-24.1104 maxslip=0.732811 dTmax=137.179  wall=7433.03 s (cpu 7176.97 s)
+step 2950 t=28.5 it=12 KE=0.000832127 Wext=0 res=-24.1104 maxslip=0.732792 dTmax=136.366  wall=8288.68 s (cpu 7993.03 s)
+step 3000 t=29 it=12 KE=0.00177334 Wext=0 res=-24.1104 maxslip=0.732787 dTmax=135.567  wall=9145.87 s (cpu 8812.13 s)
+step 3050 t=29.5 it=11 KE=0.00312758 Wext=0 res=-24.1104 maxslip=0.732747 dTmax=134.788  wall=10060.3 s (cpu 9693.21 s)
+step 3100 t=30 it=11 KE=0.00417609 Wext=0 res=-24.1104 maxslip=0.732588 dTmax=134.024  wall=10910.1 s (cpu 10511 s)
+accepted steps: largest local residual 5.74172e-15 (robust loop), 9.99966e-15 (polish); largest slip stress ratio |tau|/(f tau_c) 4.98643, steps with a ratio above 300 (where the capped slip law differs from the exact one): 0
+phase-field linear solve (r8b): projected CG (CG + Jacobi on the eliminated system), CG iterations 0, CG solves redone directly 0, steps repeated with the previous solver 0
+fast assembly (r8, -fastasm 1): phase 1800, element means 8788, linear operators 1800 calls; 250 compared with the forms (-fastcheck 50), largest relative difference 1.29188e-12
+fast assembly: largest matrix check deviation 1.7277e-16 (limit 1e-9; rank 0)
+branch guard (-betamax 45 deg): largest |beta| at accepted steps 0.126473 deg; rejected iterates 0, rejected steps 0
+final-state checks: rejected for the global residual, the constraint or admissibility 0
+local acceptance test (-localtol 1e-10): largest residual 9.99966e-15, rejections 0; slip law exact (no cap)
+spatial power split, loaded steps 2501..3100 of this launch (every step of the run: <out>_power.csv): plastic work with centroid driving forces 0.00672984, with their Gauss-point mean 0.00672729; net difference 0.000378501 and element-by-element sum |P_q - P_c| 0.0167181 of sum |P_c| (largest per step 0.0026493, 0.0733433); largest |<tau>_q - tau_c| / max |tau_c| 0.663634
+second retries with the exact KWC Hessian (-retrytan -1): 0, converged 0
+local update (-localcold 0): largest local residual left by any call 9.99994e-15 (increment units), local updates restarted from zero increments 0
+done. wall time 10915.1 s (cpu 10515.5 s);  unconverged steps 0, retries 0, line-search halvings 2814, steps converged on du only (residual floor) 0, ILU factorizations 7588, GMRES fallbacks 0 (max GMRES residual 9.99933e-11)
+safeguard counters: det F bound rejections 0, branch-guard rejections 0, stagnation abandons 0, line-search failures 0, phase-field failures 0, bound-pinned node-iterations 0, SSD-floor steps 0 (elements 0, stored-energy credit 0), storage-cap steps 0 (elements 0, stored energy withheld 0), W_plate 24.0817
+WARNING! There are options you set that were not used!
+WARNING! could be spelling mistake, etc!
+There are 62 unused database options. They are:
+Option left: name:-almc value: 4 source: command line
+Option left: name:-asm value: 1 source: command line
+Option left: name:-betamax value: 0.785398 source: command line
+Option left: name:-c2m value: 10 source: command line
+Option left: name:-ca value: 3.16227766 source: command line
+Option left: name:-cd value: 100 source: command line
+Option left: name:-ckevery value: 50 source: command line
+Option left: name:-ckroll value: 20 source: command line
+Option left: name:-diag value: 1 source: command line
+Option left: name:-dt value: 0.01 source: command line
+Option left: name:-el_sub_pc_type value: ilu source: code
+Option left: name:-etaphi value: 0.1 source: command line
+Option left: name:-etaphimin value: 1e-2 source: command line
+Option left: name:-etastar value: 1 source: command line
+Option left: name:-f0 value: 0.005944 source: command line
+Option left: name:-j value: 0 source: command line
+Option left: name:-jmin value: 0.1 source: command line
+Option left: name:-k0 value: 0 source: command line
+Option left: name:-kmtd value: 4.1535e-4 source: command line
+Option left: name:-kmtk value: 0.0228 source: command line
+Option left: name:-kp value: 5.0 source: command line
+Option left: name:-kwca value: 0.10 source: command line
+Option left: name:-kwcd value: 5e-4 source: command line
+Option left: name:-kwcs value: 1.05 source: command line
+Option left: name:-kwctan value: 3 source: command line
+Option left: name:-lintol value: 1e-10 source: command line
+Option left: name:-localtol value: 1e-10 source: command line
+Option left: name:-lsmax value: 6 source: command line
+Option left: name:-maxit value: 40 source: command line
+Option left: name:-maxitretry value: 80 source: command line
+Option left: name:-muc value: 754 source: command line
+Option left: name:-nlocal value: 30 source: command line
+Option left: name:-npexpect value: 16 source: command line
+Option left: name:-nrelax value: 100 source: command line
+Option left: name:-nw (no value) source: command line
+Option left: name:-out value: out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm source: command line
+Option left: name:-phikkt value: 1e-8 source: command line
+Option left: name:-phimaxit value: 40 source: command line
+Option left: name:-phitol value: 1e-10 source: command line
+Option left: name:-pistonup value: 0.06470476128 source: command line
+Option left: name:-pistonut value: 0.2414814566 source: command line
+Option left: name:-polish value: 20 source: command line
+Option left: name:-precevery value: 0 source: command line
+Option left: name:-pth value: 2.0 source: command line
+Option left: name:-ptr value: 0.5 source: command line
+Option left: name:-qphi value: 100e3 source: command line
+Option left: name:-resfloor value: 1e-8 source: command line
+Option left: name:-restart value: out_a75_up250ms_v2_kt3pcgkm/a75_up250ms_v2_kt3pcgkm_ck.txt source: command line
+Option left: name:-rhofcut value: 1e4 source: command line
+Option left: name:-rhommin value: 1 source: command line
+Option left: name:-rhomsat value: 100 source: command line
+Option left: name:-slipexact value: 1 source: command line
+Option left: name:-softmin value: 0.01 source: command line
+Option left: name:-spinbranch value: 0.785398 source: command line
+Option left: name:-stagres value: 100 source: command line
+Option left: name:-tanevery value: 1 source: command line
+Option left: name:-tend value: 30 source: command line
+Option left: name:-tolres value: 1e-6 source: command line
+Option left: name:-tstop value: 1400 source: command line
+Option left: name:-v value: 0 source: command line
+Option left: name:-vc value: 2 source: command line
+Option left: name:-vtkevery value: 10 source: command line
